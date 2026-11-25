@@ -33,7 +33,7 @@ export class TokenService {
   }
 
   signUser(user: { id: string; username: string }): string {
-    return jwt.sign({ typ: 'user', sub: user.id, username: user.username }, this.secret, { expiresIn: '7d' });
+    return jwt.sign({ typ: 'user', sub: user.id, username: user.username || '' }, this.secret, { expiresIn: '7d' });
   }
 
   signGuest(guest: { id: string; roomId: string; name: string }, expiresInSec: number): string {
@@ -45,8 +45,8 @@ export class TokenService {
 
   readUser(token: string | undefined): UserClaims | null {
     const payload = this.verify(token);
-    if (!payload || payload.typ !== 'user' || !payload.sub || !payload.username) return null;
-    return { typ: 'user', sub: payload.sub, username: payload.username };
+    if (!payload || payload.typ !== 'user' || !payload.sub) return null;
+    return { typ: 'user', sub: payload.sub, username: typeof payload.username === 'string' ? payload.username : '' };
   }
 
   readGuest(token: string | undefined): GuestClaims | null {

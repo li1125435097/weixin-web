@@ -1,14 +1,14 @@
 <template>
-  <WxFrame mode="chat" :show-sessions="role === 'owner'">
+  <WxFrame mode="chat">
     <template #sessions>
-      <SessionList v-if="role === 'owner'" :active-id="roomId" :live-text="liveText" :live-at="liveAt" />
+      <SessionList :active-id="conversationId" :live-text="liveText" :live-at="liveAt" />
     </template>
 
     <section v-if="phase === 'boot'" class="wx-ended"><p>正在连接</p></section>
     <section v-else-if="phase === 'ended'" class="wx-ended">
       <template v-if="!hideReplaced">
         <p>{{ endedReason }}</p>
-        <button v-if="role === 'owner'" type="button" @click="router.push('/')">返回消息</button>
+        <button type="button" @click="router.push('/')">返回消息</button>
       </template>
     </section>
     <section v-else class="wx-chat">
@@ -16,41 +16,43 @@
         <button class="wx-back" type="button" aria-label="返回" @click="leaveChat">
           <WxIcon name="back" />
         </button>
-        <h1>{{ peerName || (role === 'owner' ? '等待对方加入' : '聊天') }}</h1>
+        <h1>{{ peerName || (invitePath ? '等待对方加入' : '聊天') }}</h1>
         <span class="wx-nav-actions">
           <button type="button" aria-label="视频通话" @click="onVideo">
             <WxIcon name="video" />
           </button>
-          <button v-if="role === 'owner'" type="button" aria-label="更多" @click="moreOpen = true">
+          <button v-if="invitePath" type="button" aria-label="更多" @click="moreOpen = true">
             <WxIcon name="more" />
           </button>
         </span>
       </header>
       <p v-if="peerReconnecting" class="wx-banner">对方正在重连</p>
       <div ref="scroller" class="wx-msgs">
-        <p v-if="role === 'guest' && messages.length === 0" class="wx-system">可以发消息、语音，或点右上角视频通话</p>
-        <section v-if="role === 'owner'" class="wx-invite">
-          <p>把链接发给对方，打开就能聊天、发语音、打视频。</p>
+        <p v-if="messages.length === 0" class="wx-system">可以发消息、语音，或点右上角视频通话</p>
+        <section v-if="invitePath && !peerJoined" class="wx-invite">
+          <p>把链接发给对方，打开就能聊天、发语音、打视频。对方不在线也能收到消息。</p>
           <p class="wx-url">{{ link }}</p>
           <button type="button" @click="copyLink">复制邀请链接</button>
-          <p class="wx-hint">聊天记录只留在这台设备上。</p>
         </section>
         <template v-for="(message, index) in messages" :key="message.id">
           <p v-if="showTime(index)" class="wx-time">{{ formatStamp(message.createdAt) }}</p>
           <p v-if="message.type === 'system'" class="wx-system">{{ message.content }}</p>
-          <div v-else class="wx-row" :class="{ mine: message.sender === role }">
+          <div v-else class="wx-row" :class="{ mine: message.senderId === selfId }">
             <span class="wx-avatar" :style="{ background: avatarColor(avatarName(message)) }">{{ initial(avatarName(message)) }}</span>
-            <button
-              v-if="message.type === 'voice'"
-              type="button"
-              class="wx-voice"
-              :style="{ width: voiceWidth(message) }"
-              @click="playVoice(message)"
-            >
-              <i :class="{ playing: playingId === message.id }"></i>
-              <span>{{ voiceSeconds(message) }}"</span>
-            </button>
-            <p v-else class="wx-bubble">{{ message.content }}</p>
+            <div class="wx-msg-col">
+              <button
+                v-if="message.type === 'voice'"
+                type="button"
+                class="wx-voice"
+                :style="{ width: voiceWidth(message) }"
+                @click="playVoice(message)"
+              >
+                <i :class="{ playing: playingId === message.id }"></i>
+                <span>{{ voiceSeconds(message) }}"</span>
+              </button>
+              <p v-else class="wx-bubble">{{ message.content }}</p>
+              <em v-if="message.senderId === selfId" class="wx-read" :class="{ on: message.read }">{{ message.read ? '已读' : '未读' }}</em>
+            </div>
           </div>
         </template>
       </div>
@@ -167,12 +169,12 @@ import SessionList from '../components/SessionList.vue';
 import WxFrame from '../components/WxFrame.vue';
 import WxIcon from '../components/WxIcon.vue';
 import { useCall, type DeviceState } from '../composables/useCall';
-import type { StoredMessage } from '../chatStorage';
+import type { ChatMessage } from '../types';
 import { avatarColor, formatStamp, initial } from '../ui';
 
 const route = useRoute();
 const router = useRouter();
-const roomId = String(route.params.roomId);
+const conversationId = String(route.params.conversationId);
 const localVideo = ref<HTMLVideoElement | null>(null);
 const remoteVideo = ref<HTMLVideoElement | null>(null);
 const scroller = ref<HTMLElement | null>(null);
@@ -201,10 +203,11 @@ let holdGen = 0;
 
 const {
   phase,
-  role,
+  selfId,
   selfName,
   peerName,
-  peerOnline,
+  peerJoined,
+  invitePath,
   messages,
   error,
   notice,
@@ -228,16 +231,17 @@ const {
   flipCam,
   sendChat,
   sendVoice,
-} = useCall(roomId, { local: localVideo, remote: remoteVideo });
+} = useCall(conversationId, { local: localVideo, remote: remoteVideo });
 
 const mobileQuery = window.matchMedia('(max-width: 899px), (hover: none) and (pointer: coarse)');
 const narrow = ref(mobileQuery.matches);
-const hideReplaced = computed(() => narrow.value && endedCode.value === 'replaced' && role.value === 'owner');
+const hideReplaced = computed(() => narrow.value && endedCode.value === 'replaced');
 const inCall = computed(() => phase.value === 'outgoing' || phase.value === 'incoming' || phase.value === 'active');
 const showLocal = computed(() => camState.value === 'ready' && camOn.value && (phase.value === 'active' || phase.value === 'outgoing'));
 const link = computed(() => {
-  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
-  return `${location.origin}${base}join/${roomId}`;
+  if (!invitePath.value) return '';
+  const prefix = import.meta.env.BASE_URL.replace(/\/$/, '');
+  return `${location.origin}${prefix}${invitePath.value}`;
 });
 const liveText = computed(() => {
   const last = messages.value[messages.value.length - 1];
@@ -282,7 +286,7 @@ function onResize(): void {
 }
 
 watch(hideReplaced, (hide) => {
-  if (hide && role.value === 'owner') void router.replace('/');
+  if (hide) void router.replace('/');
 });
 
 onMounted(() => {
@@ -309,8 +313,8 @@ onBeforeRouteLeave(async () => {
   else if (phase.value === 'active' || phase.value === 'outgoing') await hangup();
 });
 
-function avatarName(message: StoredMessage): string {
-  if (message.sender === role.value) return selfName.value || '我';
+function avatarName(message: ChatMessage): string {
+  if (message.senderId === selfId.value) return selfName.value || '我';
   return message.senderName || peerName.value || '对方';
 }
 
@@ -348,16 +352,15 @@ function deviceClass(state: DeviceState, on: boolean): Record<string, boolean> {
 }
 
 function leaveChat(): void {
-  if (role.value === 'owner') void router.push('/');
-  else router.back();
+  void router.push('/');
 }
 
 function onVideo(): void {
-  if (role.value === 'guest' || peerOnline.value) {
-    void inviteCall();
+  if (!peerJoined.value) {
+    shareOpen.value = true;
     return;
   }
-  shareOpen.value = true;
+  void inviteCall();
 }
 
 function toggleVoice(): void {
@@ -425,15 +428,15 @@ async function closeChat(): Promise<void> {
   if (ok) await router.push('/');
 }
 
-function voiceSeconds(message: StoredMessage): number {
+function voiceSeconds(message: ChatMessage): number {
   return Math.max(1, Math.round((message.durationMs || 1000) / 1000));
 }
 
-function voiceWidth(message: StoredMessage): string {
+function voiceWidth(message: ChatMessage): string {
   return `${Math.min(220, 72 + voiceSeconds(message) * 4)}px`;
 }
 
-function voiceSrc(message: StoredMessage): string {
+function voiceSrc(message: ChatMessage): string {
   const cached = urls.get(message.id);
   if (cached) return cached;
   const binary = atob(message.content);
@@ -445,7 +448,7 @@ function voiceSrc(message: StoredMessage): string {
   return url;
 }
 
-function playVoice(message: StoredMessage): void {
+function playVoice(message: ChatMessage): void {
   if (message.type !== 'voice') return;
   if (playingId.value === message.id) {
     audio.pause();

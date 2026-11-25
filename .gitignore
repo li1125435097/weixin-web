@@ -158,3 +158,5 @@ vite.config.ts.timestamp-*
 
 # Server data
 apps/server/data/*.json
+server/data/*
+!server/data/.gitkeep

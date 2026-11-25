@@ -9,19 +9,24 @@ import {
   WebSocketServer,
 } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
-import { GUEST_COOKIE, SESSION_COOKIE } from '../auth/cookies';
+import { displayNameOf } from '../common/admin';
+import { SESSION_COOKIE } from '../auth/cookies';
 import { TokenService } from '../auth/token.service';
+import { ChatService } from '../chat/chat.service';
 import { errorMessage } from '../common/fail';
 import { normalizeChat } from '../messages/chat-policy';
 import { RealtimeService } from '../rooms/realtime.service';
-import { MemberRole } from '../rooms/room.types';
+import { MemberRole, Room } from '../rooms/room.types';
 import { RoomsService } from '../rooms/rooms.service';
+import { UsersService } from '../users/users.service';
+import { StoredUser } from '../users/users.types';
 
 interface SocketMeta {
-  roomId: string;
-  role: MemberRole;
-  id: string;
+  conversationId: string;
+  userId: string;
   name: string;
+  roomId?: string;
+  role?: MemberRole;
 }
 
 @WebSocketGateway({ cors: { origin: true, credentials: true }, maxHttpBufferSize: 2_000_000 })
@@ -36,6 +41,8 @@ export class SignalingGateway implements OnGatewayInit, OnGatewayDisconnect, OnM
     private readonly rooms: RoomsService,
     private readonly tokens: TokenService,
     private readonly realtime: RealtimeService,
+    private readonly chat: ChatService,
+    private readonly users: UsersService,
   ) {}
 
   onModuleInit(): void {
@@ -52,37 +59,50 @@ export class SignalingGateway implements OnGatewayInit, OnGatewayDisconnect, OnM
     const meta = this.metas.get(client.id);
     this.metas.delete(client.id);
     this.chatHits.delete(client.id);
-    if (!meta) return;
+    this.realtime.unbind(client.id);
+    if (meta && this.realtime.userSockets(meta.userId).length === 0) {
+      const peerId = this.chat.memberIds(meta.conversationId).find((id) => id !== meta.userId);
+      if (peerId) this.realtime.toUser(peerId, 'peer:offline', { conversationId: meta.conversationId });
+    }
+    if (!meta?.roomId || !meta.role) return;
     this.rooms.detach(meta.roomId, meta.role, client.id);
   }
 
-  @SubscribeMessage('room:join')
-  join(@ConnectedSocket() client: Socket, @MessageBody() body: { roomId?: string }) {
+  @SubscribeMessage('conversation:join')
+  join(@ConnectedSocket() client: Socket, @MessageBody() body: { conversationId?: string }) {
     try {
-      const roomId = typeof body?.roomId === 'string' ? body.roomId : '';
-      this.rooms.must(roomId);
-      const member = this.identify(client, roomId);
-      if (!member) return { ok: false, message: '请先登录或通过邀请链接进入' };
-      const attached = this.rooms.attach(roomId, { ...member, socketId: client.id });
-      const room = this.rooms.must(roomId);
-      this.metas.set(client.id, { roomId, role: member.role, id: member.id, name: member.name });
-      client.emit('room:joined', {
-        roomId,
-        role: member.role,
-        status: room.status,
-        reconnected: attached.reconnected,
-        selfName: member.name,
-        peerName: member.role === 'owner' ? room.guest?.name || '' : room.ownerName,
-        peerOnline: Boolean(member.role === 'owner' ? room.guest?.socketId : room.ownerSocketId),
-        expiresAt: room.expiresAt,
-        callFrom: room.callFrom ?? null,
-      });
-      if (attached.replacedSocketId) {
-        this.realtime.to(attached.replacedSocketId, 'call:end', { roomId, reason: 'replaced' });
-        this.realtime.disconnect(attached.replacedSocketId);
+      const user = this.currentUser(client);
+      if (!user) return { ok: false, message: '请先登录' };
+      const conversationId = typeof body?.conversationId === 'string' ? body.conversationId : '';
+      this.chat.assertMember(conversationId, user.id);
+      const name = displayNameOf(user);
+      this.metas.set(client.id, { conversationId, userId: user.id, name });
+      this.realtime.bindUser(user.id, client.id);
+      const summary = this.chat.list(user.id).find((item) => item.id === conversationId);
+      const room = this.rooms.prepare(conversationId, user);
+      let roomState: Record<string, unknown> | null = null;
+      if (room && (room.ownerId === user.id || room.guest?.id === user.id)) {
+        const role: MemberRole = room.ownerId === user.id ? 'owner' : 'guest';
+        roomState = this.bindRoom(client.id, room, role, name);
       }
-      const peerSocket = member.role === 'owner' ? room.guest?.socketId : room.ownerSocketId;
-      if (peerSocket) this.realtime.to(peerSocket, 'peer:online', { roomId, name: member.name });
+      const readAt = Date.now();
+      this.chat.markRead(conversationId, user.id, readAt);
+      const peerId = summary?.peerId ?? null;
+      if (peerId) {
+        this.realtime.toUser(peerId, 'chat:read', { conversationId, readAt });
+        this.realtime.toUser(peerId, 'peer:online', { conversationId, name });
+      }
+      client.emit('conversation:state', {
+        ...(roomState || { role: null, roomId: null, status: null, callFrom: null, peerOnline: false }),
+        conversationId,
+        kind: summary?.kind ?? 'invite',
+        selfId: user.id,
+        selfName: name,
+        peerName: summary?.peerId ? summary.title : '',
+        peerJoined: Boolean(summary?.peerId),
+        peerOnline: peerId ? this.realtime.userSockets(peerId).some((id) => id !== client.id) : false,
+        invitePath: room && room.ownerId === user.id ? `/join/${room.id}` : null,
+      });
       return { ok: true };
     } catch (error) {
       return { ok: false, message: errorMessage(error) };
@@ -92,9 +112,23 @@ export class SignalingGateway implements OnGatewayInit, OnGatewayDisconnect, OnM
   @SubscribeMessage('call:invite')
   invite(@ConnectedSocket() client: Socket) {
     const meta = this.metas.get(client.id);
-    if (!meta) return { ok: false, message: '未加入房间' };
+    if (!meta) return { ok: false, message: '未加入聊天' };
     try {
-      this.rooms.invite(meta.roomId, meta);
+      const user = this.users.findStored(meta.userId);
+      if (!user) return { ok: false, message: '请先登录' };
+      const room = this.rooms.ensureCall(meta.conversationId, user);
+      const role: MemberRole = room.ownerId === user.id ? 'owner' : 'guest';
+      this.bindRoom(client.id, room, role, meta.name);
+      const peerId = room.ownerId === user.id ? room.guest?.id : room.ownerId;
+      if (peerId) {
+        for (const socketId of this.realtime.userSockets(peerId)) {
+          const peer = this.metas.get(socketId);
+          if (!peer || peer.conversationId !== meta.conversationId) continue;
+          const peerRole: MemberRole = room.ownerId === peerId ? 'owner' : 'guest';
+          this.bindRoom(socketId, room, peerRole, peer.name);
+        }
+      }
+      this.rooms.invite(room.id, { role, id: user.id, name: meta.name });
       return { ok: true };
     } catch (error) {
       return { ok: false, message: errorMessage(error) };
@@ -103,50 +137,22 @@ export class SignalingGateway implements OnGatewayInit, OnGatewayDisconnect, OnM
 
   @SubscribeMessage('call:accept')
   accept(@ConnectedSocket() client: Socket) {
-    const meta = this.metas.get(client.id);
-    if (!meta) return { ok: false, message: '未加入房间' };
-    try {
-      this.rooms.accept(meta.roomId, meta);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, message: errorMessage(error) };
-    }
+    return this.withRoom(client, (roomId, actor) => this.rooms.accept(roomId, actor));
   }
 
   @SubscribeMessage('call:reject')
   reject(@ConnectedSocket() client: Socket) {
-    const meta = this.metas.get(client.id);
-    if (!meta) return { ok: false, message: '未加入房间' };
-    try {
-      this.rooms.reject(meta.roomId, meta);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, message: errorMessage(error) };
-    }
+    return this.withRoom(client, (roomId, actor) => this.rooms.reject(roomId, actor));
   }
 
   @SubscribeMessage('call:end')
   end(@ConnectedSocket() client: Socket) {
-    const meta = this.metas.get(client.id);
-    if (!meta) return { ok: false, message: '未加入房间' };
-    try {
-      this.rooms.finishCall(meta.roomId, meta);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, message: errorMessage(error) };
-    }
+    return this.withRoom(client, (roomId, actor) => this.rooms.finishCall(roomId, actor));
   }
 
   @SubscribeMessage('room:close')
   close(@ConnectedSocket() client: Socket) {
-    const meta = this.metas.get(client.id);
-    if (!meta) return { ok: false, message: '未加入房间' };
-    try {
-      this.rooms.close(meta.roomId, meta);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, message: errorMessage(error) };
-    }
+    return this.withRoom(client, (roomId, actor) => this.rooms.close(roomId, actor));
   }
 
   @SubscribeMessage('webrtc:offer')
@@ -165,25 +171,76 @@ export class SignalingGateway implements OnGatewayInit, OnGatewayDisconnect, OnM
   }
 
   @SubscribeMessage('chat:send')
-  chat(@ConnectedSocket() client: Socket, @MessageBody() body: unknown) {
+  chatMessage(@ConnectedSocket() client: Socket, @MessageBody() body: unknown) {
     const meta = this.metas.get(client.id);
-    if (!meta) return { ok: false, message: '未加入房间' };
+    if (!meta) return { ok: false, message: '未加入聊天' };
     if (!this.allowChat(client.id)) return { ok: false, message: '发送太快了' };
-    const peer = this.rooms.peer(meta.roomId, meta.role, client.id);
-    if (!peer) return { ok: false, message: '对方不在线' };
     try {
-      const message = normalizeChat(body, meta.role, meta.name);
-      this.realtime.to(peer.socketId, 'chat:new', message);
-      this.realtime.to(client.id, 'chat:new', message);
+      const draft = normalizeChat(body);
+      const saved = this.chat.send(meta.conversationId, meta.userId, draft);
+      let message = saved.message;
+      const members = this.chat.memberIds(meta.conversationId);
+      const peerId = members.find((id) => id !== meta.userId);
+      const watching = peerId
+        ? [...this.metas.values()].some((item) => item.userId === peerId && item.conversationId === meta.conversationId)
+        : false;
+      if (peerId && watching) {
+        const readAt = Date.now();
+        this.chat.markRead(meta.conversationId, peerId, readAt);
+        message = { ...message, read: true };
+        this.realtime.toUser(meta.userId, 'chat:read', { conversationId: meta.conversationId, readAt });
+      }
+      for (const memberId of members) this.realtime.toUser(memberId, 'chat:new', message);
+      if (saved.deletedIds.length > 0) {
+        for (const memberId of members) this.realtime.toUser(memberId, 'chat:trim', { conversationId: meta.conversationId, ids: saved.deletedIds });
+      }
       return { ok: true };
     } catch (error) {
       return { ok: false, message: errorMessage(error) };
     }
   }
 
+  private withRoom(client: Socket, fn: (roomId: string, actor: { role: MemberRole; id: string; name: string }) => void) {
+    const meta = this.metas.get(client.id);
+    if (!meta?.roomId || !meta.role) return { ok: false, message: '未加入房间' };
+    try {
+      fn(meta.roomId, { role: meta.role, id: meta.userId, name: meta.name });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, message: errorMessage(error) };
+    }
+  }
+
+  private bindRoom(socketId: string, room: Room, role: MemberRole, name: string) {
+    const meta = this.metas.get(socketId);
+    if (!meta) return null;
+    const memberId = role === 'owner' ? room.ownerId : room.guest?.id;
+    if (!memberId) return null;
+    meta.roomId = room.id;
+    meta.role = role;
+    const attached = this.rooms.attach(room.id, { role, id: memberId, name, socketId });
+    if (attached.replacedSocketId) {
+      this.realtime.to(attached.replacedSocketId, 'call:end', { roomId: room.id, reason: 'replaced' });
+      this.realtime.disconnect(attached.replacedSocketId);
+    }
+    const payload = {
+      roomId: room.id,
+      role,
+      status: room.status,
+      reconnected: attached.reconnected,
+      selfName: name,
+      peerName: role === 'owner' ? room.guest?.name || '' : room.ownerName,
+      peerOnline: Boolean(role === 'owner' ? room.guest?.socketId : room.ownerSocketId),
+      expiresAt: room.expiresAt,
+      callFrom: room.callFrom ?? null,
+    };
+    this.realtime.to(socketId, 'room:joined', payload);
+    return payload;
+  }
+
   private relay(client: Socket, event: string, body: unknown, kind: 'offer' | 'answer' | 'ice') {
     const meta = this.metas.get(client.id);
-    if (!meta) return { ok: false, message: '未加入房间' };
+    if (!meta?.roomId || !meta.role) return { ok: false, message: '未加入房间' };
     const peer = this.rooms.peer(meta.roomId, meta.role, client.id);
     if (!peer) return { ok: false, message: '对方不在线' };
     if (peer.status !== 'active') return { ok: false, message: '通话还没开始' };
@@ -199,19 +256,10 @@ export class SignalingGateway implements OnGatewayInit, OnGatewayDisconnect, OnM
     return { ok: true };
   }
 
-  private identify(client: Socket, roomId: string): { role: MemberRole; id: string; name: string } | null {
-    const header = client.handshake.headers.cookie;
-    const room = this.rooms.peek(roomId);
-    if (!room) return null;
-    const session = this.tokens.readUser(readCookie(header, SESSION_COOKIE));
-    if (session && session.sub === room.ownerId) {
-      return { role: 'owner', id: session.sub, name: room.ownerName };
-    }
-    const guest = this.tokens.readGuest(readCookie(header, GUEST_COOKIE));
-    if (guest && guest.roomId === roomId && room.guest?.id === guest.sub) {
-      return { role: 'guest', id: guest.sub, name: room.guest.name };
-    }
-    return null;
+  private currentUser(client: Socket): StoredUser | null {
+    const session = this.tokens.readUser(readCookie(client.handshake.headers.cookie, SESSION_COOKIE));
+    if (!session) return null;
+    return this.users.findStored(session.sub);
   }
 
   private allowChat(socketId: string): boolean {
@@ -241,9 +289,7 @@ function cleanSdp(input: unknown, type: 'offer' | 'answer'): { type: 'offer' | '
   const raw = (input as { sdp?: unknown }).sdp;
   if (!raw || typeof raw !== 'object') return null;
   const desc = raw as { type?: unknown; sdp?: unknown };
-  if (desc.type !== type || typeof desc.sdp !== 'string' || desc.sdp.length === 0 || desc.sdp.length > 100_000) {
-    return null;
-  }
+  if (desc.type !== type || typeof desc.sdp !== 'string' || desc.sdp.length === 0 || desc.sdp.length > 100_000) return null;
   return { type, sdp: desc.sdp };
 }
 

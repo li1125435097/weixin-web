@@ -1,11 +1,11 @@
-FROM node:22-alpine AS web
+FROM node:24-alpine AS web
 WORKDIR /web
 COPY apps/web/package.json apps/web/package-lock.json ./
 RUN npm ci
 COPY apps/web/ ./
 RUN npm run build
 
-FROM node:22-alpine AS api
+FROM node:24-alpine AS api
 WORKDIR /app
 COPY apps/server/package.json apps/server/package-lock.json ./
 RUN npm ci
@@ -13,7 +13,7 @@ COPY apps/server/tsconfig.json apps/server/tsconfig.build.json apps/server/nest-
 COPY apps/server/src ./src
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22-alpine
+FROM node:24-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV WEB_ROOT=/app/web

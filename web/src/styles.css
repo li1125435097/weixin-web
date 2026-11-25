@@ -195,6 +195,59 @@ input:focus { outline: none; }
 
 .wx-cell.ringing p { color: #fa5151; }
 
+.wx-cell.static { cursor: default; }
+
+.wx-badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #fa5151;
+  color: #fff;
+  font-size: 12px;
+  font-style: normal;
+  line-height: 18px;
+  text-align: center;
+}
+
+.wx-mini {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  background: #07c160;
+  color: #fff;
+  font-size: 13px;
+}
+
+.wx-mini.ghost { background: #f2f2f2; color: #111; }
+
+.wx-add-friend { display: flex; gap: 8px; padding: 12px; background: #fff; }
+
+.wx-add-friend input {
+  flex: 1;
+  height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: #f5f5f5;
+  font-size: 15px;
+}
+
+.wx-add-friend .wx-green { width: auto; height: 40px; padding: 0 14px; border-radius: 6px; }
+
+.wx-read { margin-top: 4px; color: #b2b2b2; font-size: 11px; font-style: normal; }
+
+.wx-read.on { color: #07c160; }
+
+.wx-msg-col { display: flex; flex-direction: column; align-items: flex-start; max-width: min(70%, 460px); min-width: 0; }
+
+.wx-row.mine .wx-msg-col { align-items: flex-end; }
+
+.wx-msg-col .wx-bubble { max-width: 100%; }
+
+.wx-me-row.link { color: #576b95; }
+
 .wx-empty-line { margin: 0; padding: 32px 12px; color: #b2b2b2; text-align: center; }
 
 .wx-pop-mask { position: fixed; inset: 0; z-index: 6; }

@@ -1,5 +1,9 @@
 import { ConflictException, ForbiddenException, Injectable, NotFoundException, OnModuleDestroy } from '@nestjs/common';
+import { displayNameOf } from '../common/admin';
 import { isRoomId, newId } from '../common/ids';
+import { ChatService } from '../chat/chat.service';
+import { UsersService } from '../users/users.service';
+import { StoredUser } from '../users/users.types';
 import { Member, Room, RoomListener } from './room.types';
 
 const DEFAULT_TTL_SECONDS = 60 * 60 * 2;
@@ -16,7 +20,10 @@ export class RoomsService implements OnModuleDestroy {
   private listener: RoomListener | null = null;
   private readonly sweeper: NodeJS.Timeout;
 
-  constructor() {
+  constructor(
+    private readonly chat: ChatService,
+    private readonly users: UsersService,
+  ) {
     this.sweeper = setInterval(() => this.sweep(), 15_000);
     this.sweeper.unref?.();
   }
@@ -35,17 +42,16 @@ export class RoomsService implements OnModuleDestroy {
     return Number.isFinite(parsed) && parsed >= 60 ? parsed : DEFAULT_TTL_SECONDS;
   }
 
-  create(owner: { id: string; username: string; nickname: string }): Room {
-    const open = [...this.rooms.values()].filter((room) => room.ownerId === owner.id);
-    if (open.length >= MAX_ROOMS_PER_OWNER) {
-      throw new ConflictException('进行中的房间太多，请先结束后再创建');
-    }
+  create(owner: StoredUser): Room {
+    this.assertRoomCapacity(owner.id);
     const now = Date.now();
+    const conversationId = this.chat.openInvite(owner.id);
     const room: Room = {
       id: newId(),
+      conversationId,
       ownerId: owner.id,
-      ownerName: owner.nickname,
-      ownerUsername: owner.username,
+      ownerName: displayNameOf(owner),
+      ownerUsername: owner.username || '',
       status: 'waiting',
       createdAt: now,
       expiresAt: now + this.ttlSeconds() * 1000,
@@ -54,10 +60,52 @@ export class RoomsService implements OnModuleDestroy {
     return room;
   }
 
+  ensureCall(conversationId: string, actor: StoredUser): Room {
+    const members = this.chat.memberIds(conversationId);
+    if (!members.includes(actor.id)) throw new ForbiddenException('你不在这个聊天里');
+    const existing = this.byConversation(conversationId);
+    if (existing) {
+      this.claimSeat(existing, actor);
+      if (!existing.guest) {
+        const peerId = members.find((id) => id !== existing.ownerId);
+        if (peerId) this.seatStored(existing, peerId);
+      }
+      return existing;
+    }
+    this.assertRoomCapacity(actor.id);
+    const now = Date.now();
+    const room: Room = {
+      id: newId(),
+      conversationId,
+      ownerId: actor.id,
+      ownerName: displayNameOf(actor),
+      ownerUsername: actor.username || '',
+      status: 'waiting',
+      createdAt: now,
+      expiresAt: now + this.ttlSeconds() * 1000,
+    };
+    const peerId = members.find((id) => id !== actor.id);
+    if (peerId) this.seatStored(room, peerId);
+    this.rooms.set(room.id, room);
+    return room;
+  }
+
+  prepare(conversationId: string, actor: StoredUser): Room | null {
+    const room = this.byConversation(conversationId);
+    if (!room) return null;
+    this.claimSeat(room, actor);
+    return room;
+  }
+
+  byConversation(conversationId: string): Room | null {
+    for (const room of this.rooms.values()) {
+      if (room.conversationId === conversationId && room.expiresAt > Date.now()) return room;
+    }
+    return null;
+  }
+
   list(ownerId: string) {
-    return [...this.rooms.values()]
-      .filter((room) => room.ownerId === ownerId)
-      .map((room) => this.summary(room));
+    return [...this.rooms.values()].filter((room) => room.ownerId === ownerId).map((room) => this.summary(room));
   }
 
   must(roomId: string): Room {
@@ -81,6 +129,7 @@ export class RoomsService implements OnModuleDestroy {
   summary(room: Room) {
     return {
       id: room.id,
+      conversationId: room.conversationId,
       status: room.status,
       createdAt: room.createdAt,
       expiresAt: room.expiresAt,
@@ -90,13 +139,45 @@ export class RoomsService implements OnModuleDestroy {
     };
   }
 
-  reserveGuest(roomId: string, name: string, username?: string): { guestId: string; expiresAt: number; ownerName: string } {
+  reserveGuest(roomId: string, user: { id: string; name: string; username?: string }): { conversationId: string; expiresAt: number; ownerName: string } {
     const room = this.must(roomId);
+    if (user.id === room.ownerId) {
+      return { conversationId: room.conversationId, expiresAt: room.expiresAt, ownerName: room.ownerName };
+    }
+    if (room.guest?.id === user.id) {
+      this.chat.addMember(room.conversationId, user.id);
+      return { conversationId: room.conversationId, expiresAt: room.expiresAt, ownerName: room.ownerName };
+    }
     if (room.guest) throw new ConflictException('房间已有访客');
-    const guestId = newId('g');
-    room.guest = { id: guestId, name, username: username || undefined };
+    room.guest = { id: user.id, name: user.name, username: user.username };
+    this.chat.addMember(room.conversationId, user.id);
     this.armHold(room);
-    return { guestId, expiresAt: room.expiresAt, ownerName: room.ownerName };
+    return { conversationId: room.conversationId, expiresAt: room.expiresAt, ownerName: room.ownerName };
+  }
+
+  reassign(fromId: string, user: StoredUser): void {
+    for (const room of this.rooms.values()) {
+      if (room.ownerId === fromId) {
+        room.ownerId = user.id;
+        room.ownerName = displayNameOf(user);
+        room.ownerUsername = user.username || '';
+      }
+      if (room.guest?.id !== fromId) continue;
+      if (room.ownerId === user.id) {
+        this.clearGuest(room);
+        continue;
+      }
+      room.guest.id = user.id;
+      room.guest.name = displayNameOf(user);
+      room.guest.username = user.username || undefined;
+    }
+  }
+
+  dropUser(userId: string): void {
+    for (const room of [...this.rooms.values()]) {
+      if (room.ownerId === userId) this.erase(room);
+      else if (room.guest?.id === userId) this.clearGuest(room);
+    }
   }
 
   attach(roomId: string, member: Member): { reconnected: boolean; replacedSocketId?: string } {
@@ -133,6 +214,7 @@ export class RoomsService implements OnModuleDestroy {
     }
     if (!room.guest || room.guest.socketId !== socketId) return;
     room.guest.socketId = undefined;
+    if (room.status === 'waiting') return;
     this.armGrace(room, 'guest');
   }
 
@@ -202,8 +284,11 @@ export class RoomsService implements OnModuleDestroy {
     this.assertMember(room, actor);
     if (actor.role !== 'owner') throw new ForbiddenException('只有房主可以结束聊天');
     const sockets = [room.ownerSocketId, room.guest?.socketId];
+    const conversationId = room.conversationId;
+    const removed = this.chat.isAbandonedInvite(conversationId);
     this.erase(room);
-    this.publish(sockets, 'call:end', { roomId, reason: 'closed' });
+    if (removed) this.chat.deleteConversation(conversationId);
+    this.publish(sockets, removed ? 'conversation:gone' : 'room:ended', { roomId, reason: 'closed' });
   }
 
   peer(roomId: string, role: Member['role'], socketId: string): { socketId: string; status: Room['status'] } | null {
@@ -219,13 +304,31 @@ export class RoomsService implements OnModuleDestroy {
   describe(room: Room, viewer: 'owner' | 'guest' | 'none') {
     return {
       id: room.id,
+      conversationId: room.conversationId,
       status: room.status,
       ownerNickname: room.ownerName,
       expiresAt: room.expiresAt,
-      joinable: !room.guest,
+      joinable: !room.guest && viewer !== 'owner',
       viewer,
       guestName: viewer === 'none' ? null : room.guest?.name ?? null,
     };
+  }
+
+  private assertRoomCapacity(ownerId: string): void {
+    const open = [...this.rooms.values()].filter((room) => room.ownerId === ownerId);
+    if (open.length >= MAX_ROOMS_PER_OWNER) throw new ConflictException('进行中的房间太多，请先结束后再创建');
+  }
+
+  private claimSeat(room: Room, actor: StoredUser): void {
+    if (room.ownerId === actor.id || room.guest?.id === actor.id) return;
+    if (room.guest) return;
+    room.guest = { id: actor.id, name: displayNameOf(actor), username: actor.username || undefined };
+  }
+
+  private seatStored(room: Room, userId: string): void {
+    const row = this.users.findStored(userId);
+    if (!row) return;
+    room.guest = { id: row.id, name: displayNameOf(row), username: row.username || undefined };
   }
 
   private assertMember(room: Room, actor: { role: Member['role']; id: string }): void {
@@ -251,7 +354,7 @@ export class RoomsService implements OnModuleDestroy {
       if (role === 'owner') {
         const guestSocket = room.guest?.socketId;
         this.erase(room);
-        this.publish([guestSocket], 'call:end', { roomId: room.id, reason: 'peer-left' });
+        this.publish([guestSocket], 'room:ended', { roomId: room.id, reason: 'peer-left' });
         return;
       }
       const ownerSocket = room.ownerSocketId;
@@ -301,7 +404,7 @@ export class RoomsService implements OnModuleDestroy {
   private expire(room: Room): void {
     const sockets = [room.ownerSocketId, room.guest?.socketId];
     this.erase(room);
-    this.publish(sockets, 'call:end', { roomId: room.id, reason: 'expired' });
+    this.publish(sockets, 'room:ended', { roomId: room.id, reason: 'expired' });
   }
 
   private sweep(): void {

@@ -12,15 +12,12 @@
     </div>
     <h2 v-else-if="missing">链接无效</h2>
     <p v-else class="wx-muted">正在确认房间。</p>
-    <form v-if="room?.joinable" @submit.prevent="submit">
+    <form v-if="room?.joinable && needsName" @submit.prevent="submit">
       <input id="nickname" v-model="nickname" maxlength="20" placeholder="你的名字" />
-      <p class="wx-error">{{ error }}</p>
       <button class="wx-green" type="submit">加入</button>
     </form>
-    <div v-else-if="room" class="wx-auth-actions">
-      <button v-if="room.viewer === 'owner' || room.viewer === 'guest'" class="wx-green" type="button" @click="goCall">进入聊天</button>
-      <p v-else class="wx-muted">这个链接现在不能加入。</p>
-    </div>
+    <p v-if="error" class="wx-error">{{ error }}</p>
+    <p v-else-if="room && !room.joinable && room.viewer === 'none'" class="wx-muted">这个链接现在不能加入。</p>
     <p v-if="missing" class="wx-muted">房间不存在、已结束，或服务器刚刚重启。</p>
   </main>
 </template>
@@ -28,39 +25,53 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { joinRoom, roomDetail } from '../api';
-import type { RoomDetail } from '../types';
+import { joinRoom, me, roomDetail } from '../api';
+import type { PublicUser, RoomDetail } from '../types';
 import { avatarColor, initial } from '../ui';
 
 const route = useRoute();
 const router = useRouter();
 const roomId = String(route.params.roomId);
 const room = ref<RoomDetail | null>(null);
+const user = ref<PublicUser | null>(null);
 const nickname = ref('');
 const error = ref('');
 const missing = ref(false);
+const needsName = ref(false);
 
 const title = computed(() => (missing.value ? '链接无效' : `${room.value?.ownerNickname || '对方'} 邀请你聊天`));
 
 onMounted(async () => {
   try {
+    user.value = await me();
+  } catch {
+    user.value = null;
+  }
+  try {
     room.value = await roomDetail(roomId);
   } catch {
     missing.value = true;
+    return;
   }
+  if (room.value.viewer === 'owner' || room.value.viewer === 'guest') {
+    await router.replace(`/chat/${room.value.conversationId}`);
+    return;
+  }
+  if (user.value?.kind === 'formal' && room.value.joinable) {
+    await submit();
+    return;
+  }
+  if (room.value.joinable) needsName.value = true;
 });
-
-function goCall() {
-  void router.push(`/call/${roomId}`);
-}
 
 async function submit() {
   error.value = '';
   try {
-    await joinRoom(roomId, nickname.value);
-    await router.push(`/call/${roomId}`);
+    const joined = await joinRoom(roomId, user.value?.kind === 'formal' ? undefined : nickname.value);
+    await router.replace(`/chat/${joined.conversationId}`);
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加入失败';
+    needsName.value = user.value?.kind !== 'formal';
   }
 }
 </script>

@@ -1,7 +1,7 @@
 import { onScopeDispose, ref, watch, type Ref } from 'vue';
 import { io, type Socket } from 'socket.io-client';
-import { fetchTurn } from '../api';
-import { loadMessages, remember, type StoredMessage } from '../chatStorage';
+import { ensureUser, fetchTurn, listMessages } from '../api';
+import type { ChatMessage } from '../types';
 
 export type Phase = 'boot' | 'chat' | 'outgoing' | 'incoming' | 'active' | 'ended';
 export type DeviceState = 'unknown' | 'ready' | 'missing' | 'denied' | 'unavailable';
@@ -25,17 +25,21 @@ interface Ack {
 }
 
 export function useCall(
-  roomId: string,
+  conversationId: string,
   video: { local: Ref<HTMLVideoElement | null>; remote: Ref<HTMLVideoElement | null> },
 ) {
   const phase = ref<Phase>('boot');
   const role = ref<Role | null>(null);
   const status = ref<RoomStatus>('waiting');
+  const selfId = ref('');
   const selfName = ref('');
   const peerName = ref('');
   const peerOnline = ref(false);
+  const peerJoined = ref(false);
+  const invitePath = ref<string | null>(null);
   const expiresAt = ref(0);
-  const messages = ref<StoredMessage[]>(loadMessages(roomId));
+  const messages = ref<ChatMessage[]>([]);
+  let activeRoomId = '';
   const error = ref('');
   const notice = ref('');
   const endedReason = ref('');
@@ -97,15 +101,28 @@ export function useCall(
 
   function note(text: string): void {
     if (!text) return;
-    const message: StoredMessage = {
-      id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      sender: role.value || 'owner',
-      senderName: '',
-      type: 'system',
-      content: text,
-      createdAt: Date.now(),
-    };
-    messages.value = remember(roomId, messages.value, message);
+    messages.value = [
+      ...messages.value,
+      {
+        id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        senderId: 'system',
+        senderName: '',
+        type: 'system',
+        content: text,
+        createdAt: Date.now(),
+      },
+    ];
+  }
+
+  function rememberMessage(message: ChatMessage): void {
+    const index = messages.value.findIndex((item) => item.id === message.id);
+    if (index >= 0) {
+      const next = messages.value.slice();
+      next[index] = { ...next[index], ...message };
+      messages.value = next;
+      return;
+    }
+    messages.value = [...messages.value, message];
   }
 
   function inCall(): boolean {
@@ -247,7 +264,8 @@ export function useCall(
 
   async function createOffer(): Promise<void> {
     resetPc();
-    const turn = await fetchTurn(roomId);
+    if (!activeRoomId) throw new Error('通话还没开始');
+    const turn = await fetchTurn(activeRoomId);
     const connection = new RTCPeerConnection({ iceServers: turn.iceServers });
     pc = connection;
     wire(connection);
@@ -261,7 +279,8 @@ export function useCall(
   async function applyOffer(sdp: RTCSessionDescriptionInit): Promise<void> {
     const stream = await ensureMedia();
     resetPc();
-    const turn = await fetchTurn(roomId);
+    if (!activeRoomId) throw new Error('通话还没开始');
+    const turn = await fetchTurn(activeRoomId);
     const connection = new RTCPeerConnection({ iceServers: turn.iceServers });
     pc = connection;
     wire(connection);
@@ -330,12 +349,20 @@ export function useCall(
     phase.value = 'chat';
   }
 
-  async function joinRoom(): Promise<void> {
+  async function joinConversation(): Promise<void> {
     try {
-      const result = await emitAck<Ack>('room:join', { roomId });
+      const result = await emitAck<Ack>('conversation:join', { conversationId });
       if (!result.ok) {
         endedReason.value = result.message || '无法进入聊天';
         phase.value = 'ended';
+        return;
+      }
+      try {
+        const fresh = await listMessages(conversationId);
+        const extras = messages.value.filter((item) => item.type === 'system' && !fresh.messages.some((message) => message.id === item.id));
+        messages.value = [...fresh.messages, ...extras];
+      } catch {
+        /* 已有的历史先留在页面上 */
       }
     } catch (err) {
       endedReason.value = err instanceof Error ? err.message : '无法进入聊天';
@@ -343,15 +370,48 @@ export function useCall(
     }
   }
 
-  socket.on('room:joined', (data: JoinState) => applyJoin(data));
-  socket.on('call:incoming', (payload: { callerName?: string }) => {
+  socket.on('conversation:state', (data: ConversationState) => {
+    selfId.value = data.selfId;
+    selfName.value = data.selfName || selfName.value;
+    if (data.peerName) peerName.value = data.peerName;
+    peerJoined.value = data.peerJoined;
+    peerOnline.value = data.peerOnline;
+    invitePath.value = data.invitePath;
+    if (data.roomId) activeRoomId = data.roomId;
+    if (data.role === 'owner' || data.role === 'guest') role.value = data.role;
+    if (data.status === 'ringing' || data.status === 'active') {
+      applyJoin({
+        role: data.role || role.value || 'guest',
+        status: data.status,
+        reconnected: Boolean(data.reconnected),
+        selfName: data.selfName,
+        peerName: data.peerName || peerName.value,
+        peerOnline: data.peerOnline,
+        expiresAt: data.expiresAt || 0,
+        callFrom: data.callFrom,
+      });
+      return;
+    }
+    if (phase.value === 'boot') phase.value = 'chat';
+  });
+  socket.on('room:joined', (data: JoinState & { roomId?: string }) => {
+    if (data.roomId) {
+      activeRoomId = data.roomId;
+      if (data.role === 'owner') invitePath.value = `/join/${data.roomId}`;
+    }
+    applyJoin(data);
+  });
+  socket.on('call:incoming', (payload: { callerName?: string; roomId?: string }) => {
+    if (payload?.roomId) activeRoomId = payload.roomId;
     if (payload?.callerName) peerName.value = payload.callerName;
     peerOnline.value = true;
+    peerJoined.value = true;
     peerReconnecting.value = false;
     status.value = 'ringing';
     phase.value = 'incoming';
   });
-  socket.on('call:outgoing', () => {
+  socket.on('call:outgoing', (payload?: { roomId?: string }) => {
+    if (payload?.roomId) activeRoomId = payload.roomId;
     if (phase.value === 'incoming') return;
     status.value = 'ringing';
     phase.value = 'outgoing';
@@ -370,18 +430,25 @@ export function useCall(
   });
   socket.on('call:end', (payload: { reason?: string }) => {
     const reason = payload?.reason;
-    if (reason === 'call-ended') {
-      leaveCall('通话结束');
+    if (reason === 'replaced') {
+      finish('replaced');
       return;
     }
-    if (role.value === 'owner' && reason === 'peer-left') {
+    if (reason === 'peer-left') {
       peerOnline.value = false;
       peerReconnecting.value = false;
-      peerName.value = '';
       leaveCall('对方已离开', true);
       return;
     }
-    finish(reason);
+    leaveCall(reason === 'call-ended' ? '通话结束' : '通话结束');
+  });
+  socket.on('room:ended', () => {
+    activeRoomId = '';
+    peerReconnecting.value = false;
+    if (inCall()) leaveCall('通话已结束');
+  });
+  socket.on('conversation:gone', () => {
+    finish('closed');
   });
   socket.on('peer:reconnecting', () => {
     peerReconnecting.value = true;
@@ -390,8 +457,12 @@ export function useCall(
   socket.on('peer:online', (payload: { name?: string }) => {
     peerReconnecting.value = false;
     peerOnline.value = true;
-    if (payload?.name && role.value === 'owner') peerName.value = payload.name;
+    peerJoined.value = true;
+    if (payload?.name && !peerName.value) peerName.value = payload.name;
     if (role.value === 'guest' && status.value === 'active') void lock(() => createOffer());
+  });
+  socket.on('peer:offline', () => {
+    peerOnline.value = false;
   });
   socket.on('webrtc:offer', (payload: { sdp?: RTCSessionDescriptionInit }) => {
     if (payload?.sdp) {
@@ -417,11 +488,22 @@ export function useCall(
     if (!pc || !pc.remoteDescription) pendingIce.push(payload.candidate);
     else void pc.addIceCandidate(payload.candidate).catch(() => undefined);
   });
-  socket.on('chat:new', (message: StoredMessage) => {
-    messages.value = remember(roomId, messages.value, message);
+  socket.on('chat:new', (message: ChatMessage) => {
+    if (message.conversationId && message.conversationId !== conversationId) return;
+    rememberMessage(message);
+  });
+  socket.on('chat:read', (payload: { conversationId?: string; readAt?: number }) => {
+    if (payload?.conversationId && payload.conversationId !== conversationId) return;
+    const readAt = payload?.readAt || 0;
+    messages.value = messages.value.map((item) => (item.senderId === selfId.value && item.createdAt <= readAt ? { ...item, read: true } : item));
+  });
+  socket.on('chat:trim', (payload: { ids?: string[] }) => {
+    const ids = new Set(payload?.ids || []);
+    if (ids.size === 0) return;
+    messages.value = messages.value.filter((item) => !ids.has(item.id));
   });
   socket.on('connect', () => {
-    void joinRoom();
+    void joinConversation();
   });
   socket.on('disconnect', () => {
     activeBoot = false;
@@ -573,14 +655,25 @@ export function useCall(
     stopMedia();
   });
 
-  socket.connect();
+  void (async () => {
+    try {
+      await ensureUser();
+      messages.value = (await listMessages(conversationId)).messages;
+    } catch {
+      /* 历史记录会在进入会话后补上 */
+    }
+    socket.connect();
+  })();
 
   return {
     phase,
     role,
+    selfId,
     selfName,
     peerName,
     peerOnline,
+    peerJoined,
+    invitePath,
     expiresAt,
     messages,
     error,
@@ -608,6 +701,13 @@ export function useCall(
     sendChat,
     sendVoice,
   };
+}
+
+interface ConversationState extends JoinState {
+  selfId: string;
+  peerJoined: boolean;
+  invitePath: string | null;
+  roomId?: string;
 }
 
 function reasonText(reason?: string): string {

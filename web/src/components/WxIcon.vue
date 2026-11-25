@@ -34,6 +34,12 @@ defineProps<{ name: string }>();
       <circle cx="12" cy="9" r="3" />
       <path d="M6.5 19c.8-2.4 2.8-3.6 5.5-3.6s4.7 1.2 5.5 3.6" />
     </template>
+    <template v-else-if="name === 'contacts'">
+      <circle cx="9" cy="9" r="2.4" />
+      <circle cx="16" cy="10" r="1.8" />
+      <path d="M4.6 18.2c.6-2.3 2.3-3.4 4.4-3.4s3.8 1.1 4.4 3.4" />
+      <path d="M13.2 18c.4-1.6 1.5-2.5 3-2.5 1.3 0 2.3.7 2.8 2" />
+    </template>
     <template v-else-if="name === 'phone'">
       <path d="M8 4h2l1.2 3-1.6 1a12 12 0 0 0 6.4 6.4l1-1.6 3 1.2v2A2 2 0 0 1 18 18 14 14 0 0 1 6 6a2 2 0 0 1 2-2z" />
     </template>

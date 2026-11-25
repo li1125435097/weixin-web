@@ -9,12 +9,12 @@ REMOTE_DIR=/root/www/chat-me
 APP_PORT=5000
 NGINX_MAP=chat-me-upgrade.conf
 NGINX_LOCATION=chat-me.location.conf
-REBUILD=true
+REBUILD=false
 
 if [ "$REBUILD" = true ]; then
   echo "== 构建前端 =="
   (
-    cd "$ROOT/apps/web"
+    cd "$ROOT/web"
     # npm ci
     npm run build
   )
@@ -25,7 +25,7 @@ fi
 if [ "$REBUILD" = true ]; then
   echo "== 构建服务端 =="
   (
-    cd "$ROOT/apps/server"
+    cd "$ROOT/server"
     # npm ci
     npm run build
   )
@@ -38,9 +38,9 @@ cleanup() { rm -rf "$STAGE"; }
 trap cleanup EXIT
 
 mkdir -p "$STAGE/server" "$STAGE/web"
-cp "$ROOT/apps/server/package.json" "$ROOT/apps/server/package-lock.json" "$STAGE/server/"
-cp -a "$ROOT/apps/server/dist" "$STAGE/server/dist"
-cp -a "$ROOT/apps/web/dist" "$STAGE/web/dist"
+cp "$ROOT/server/package.json" "$ROOT/server/package-lock.json" "$STAGE/server/"
+cp -a "$ROOT/server/dist" "$STAGE/server/dist"
+cp -a "$ROOT/web/dist" "$STAGE/web/dist"
 cp "$ROOT/deploy/nginx/$NGINX_MAP" "$ROOT/deploy/nginx/$NGINX_LOCATION" "$STAGE/"
 
 echo "== 上传到 ${SSH_HOST}:${REMOTE_DIR} =="
@@ -61,18 +61,18 @@ install_node() {
 
   if command -v node >/dev/null 2>&1; then
     major="$(node -p 'Number(process.versions.node.split(".")[0])')"
-    if [ "$major" -ge 20 ]; then
+    if [ "$major" -ge 24 ]; then
       echo "已有 Node $(node -v)"
       return
     fi
-    echo "现有 Node $(node -v) 低于 20，安装 Node 22 到 /usr/local"
+    echo "现有 Node $(node -v) 低于 24，安装 Node 24 到 /usr/local"
   else
-    echo "未检测到 Node，安装 Node 22 到 /usr/local"
+    echo "未检测到 Node，安装 Node 24 到 /usr/local"
   fi
 
   local json ver tar tmp
   json="$(curl -fsSL --retry 3 https://npmmirror.com/mirrors/node/index.json || curl -fsSL --retry 3 https://nodejs.org/dist/index.json)"
-  ver="$(printf '%s' "$json" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(next(x["version"] for x in rows if x["version"].startswith("v22.")))')"
+  ver="$(printf '%s' "$json" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(next(x["version"] for x in rows if x["version"].startswith("v24.")))')"
   ver="${ver#v}"
   tar="node-v${ver}-linux-x64.tar.xz"
   tmp="$(mktemp)"

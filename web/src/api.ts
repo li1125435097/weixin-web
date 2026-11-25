@@ -1,4 +1,4 @@
-import type { PublicUser, RoomDetail, RoomSummary } from './types';
+import type { ChatMessage, ConversationSummary, FriendCard, FriendRequestCard, PublicUser, RoomDetail, RoomSummary } from './types';
 
 function withBase(path: string): string {
   const prefix = import.meta.env.BASE_URL.replace(/\/$/, '');
@@ -26,6 +26,25 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const me = () => api<PublicUser>('/api/auth/me');
 
+export const becomeGuest = () => api<PublicUser>('/api/auth/guest', { method: 'POST' });
+
+let pendingUser: Promise<PublicUser> | null = null;
+
+export function ensureUser(): Promise<PublicUser> {
+  if (!pendingUser) {
+    pendingUser = (async () => {
+      try {
+        return await me();
+      } catch {
+        return becomeGuest();
+      }
+    })().finally(() => {
+      pendingUser = null;
+    });
+  }
+  return pendingUser;
+}
+
 export const login = (username: string, password: string) =>
   api<PublicUser>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
 
@@ -43,11 +62,27 @@ export const listRooms = () => api<{ rooms: RoomSummary[] }>('/api/rooms');
 
 export const roomDetail = (roomId: string) => api<RoomDetail>(`/api/rooms/${roomId}`);
 
-export const joinRoom = (roomId: string, nickname: string) =>
-  api<{ roomId: string; nickname: string; ownerName: string }>('/api/rooms/join', {
+export const joinRoom = (roomId: string, nickname?: string) =>
+  api<{ roomId: string; conversationId: string; nickname: string; ownerName: string }>('/api/rooms/join', {
     method: 'POST',
     body: JSON.stringify({ roomId, nickname }),
   });
+
+export const listConversations = () => api<{ conversations: ConversationSummary[] }>('/api/conversations');
+
+export const listMessages = (conversationId: string) => api<{ messages: ChatMessage[] }>(`/api/conversations/${conversationId}/messages`);
+
+export const openDirect = (userId: string) =>
+  api<ConversationSummary>('/api/conversations/direct', { method: 'POST', body: JSON.stringify({ userId }) });
+
+export const listFriends = () => api<{ friends: FriendCard[]; incoming: FriendRequestCard[] }>('/api/friends');
+
+export const requestFriend = (username: string) =>
+  api<{ ok: boolean }>('/api/friends/requests', { method: 'POST', body: JSON.stringify({ username }) });
+
+export const acceptFriend = (id: string) => api<{ ok: boolean }>(`/api/friends/requests/${id}/accept`, { method: 'POST' });
+
+export const rejectFriend = (id: string) => api<{ ok: boolean }>(`/api/friends/requests/${id}/reject`, { method: 'POST' });
 
 export const fetchTurn = (roomId: string) =>
   api<{ iceServers: RTCIceServer[] }>(`/api/rooms/${roomId}/turn`);

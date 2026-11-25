@@ -10,6 +10,7 @@ export interface GuestSeat {
 
 export interface Room {
   id: string;
+  conversationId: string;
   ownerId: string;
   ownerName: string;
   ownerUsername: string;
