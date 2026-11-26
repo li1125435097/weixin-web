@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { ChatService, ConversationSummary } from '../chat/chat.service';
 import { SessionService } from '../chat/session.service';
@@ -36,6 +36,13 @@ export class ConversationsController {
     const result = this.chat.messages(id, user.id);
     if (result.peerId) this.realtime.toUser(result.peerId, 'chat:read', { conversationId: id, readAt: result.readAt });
     return { messages: result.messages };
+  }
+
+  @Delete(':id/messages')
+  clearMessages(@Param('id') id: string, @Req() req: Request) {
+    const user = this.session.require(req);
+    this.chat.clearMessages(id, user.id);
+    return { ok: true };
   }
 
   @Post(':id/call')

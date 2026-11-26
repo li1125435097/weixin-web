@@ -11,11 +11,11 @@ body {
   line-height: 1.4;
 }
 
-button, input { font: inherit; color: inherit; }
+button, input, textarea { font: inherit; color: inherit; }
 
 button { cursor: pointer; }
 
-input:focus { outline: none; }
+input:focus, textarea:focus { outline: none; }
 
 .wx-svg { width: 24px; height: 24px; display: block; }
 
@@ -222,7 +222,7 @@ input:focus { outline: none; }
 
 .wx-mini.ghost { background: #f2f2f2; color: #111; }
 
-.wx-add-friend { display: flex; gap: 8px; padding: 12px; background: #fff; }
+.wx-add-friend { display: flex; align-items: center; gap: 8px; padding: 12px; background: #fff; }
 
 .wx-add-friend input {
   flex: 1;
@@ -234,7 +234,51 @@ input:focus { outline: none; }
   font-size: 15px;
 }
 
-.wx-add-friend .wx-green { width: auto; height: 40px; padding: 0 14px; border-radius: 6px; }
+.wx-add-friend .wx-green {
+  flex: none;
+  width: auto;
+  height: 40px;
+  margin: 0;
+  padding: 0 14px;
+  border-radius: 6px;
+  line-height: 40px;
+}
+
+.wx-mask.mid { align-items: center; padding: 24px; }
+
+.wx-find {
+  position: relative;
+  width: min(320px, 100%);
+  padding: 36px 20px 20px;
+  border-radius: 12px;
+  background: #fff;
+  text-align: center;
+}
+
+.wx-find-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: #888;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.wx-find .wx-error { color: #fa5151; }
+
+.wx-find strong { display: block; font-size: 18px; font-weight: 600; }
+
+.wx-find p { margin: 6px 0 0; color: #888; font-size: 14px; }
+
+.wx-find .wx-green { margin-top: 20px; }
 
 .wx-read { margin-top: 4px; color: #b2b2b2; font-size: 11px; font-style: normal; }
 
@@ -275,6 +319,8 @@ input:focus { outline: none; }
   font-size: 15px;
 }
 
+.wx-pop button.danger { color: #ff6b6b; }
+
 .wx-blank {
   flex: 1;
   display: grid;
@@ -284,6 +330,7 @@ input:focus { outline: none; }
 }
 
 .wx-chat {
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -455,7 +502,7 @@ input:focus { outline: none; }
 .wx-compose {
   display: flex;
   gap: 8px;
-  align-items: center;
+  align-items: flex-end;
   padding: 8px 10px;
   background: #f7f7f7;
   border-top: 1px solid #d9d9d9;
@@ -463,17 +510,31 @@ input:focus { outline: none; }
 
 .wx-compose.safe { padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
 
-.wx-compose input, .wx-hold {
+.wx-compose textarea, .wx-hold {
   flex: 1;
   min-width: 0;
-  height: 40px;
   border: 0;
   border-radius: 6px;
   background: #fff;
   font-size: 16px;
 }
 
-.wx-compose input { padding: 0 10px; }
+.wx-compose textarea {
+  display: block;
+  height: 40px;
+  min-height: 40px;
+  max-height: 120px;
+  padding: 9px 10px;
+  line-height: 22px;
+  resize: none;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.wx-hold { height: 40px; }
+
+.wx-compose .wx-send { margin-bottom: 4px; }
 
 .wx-hold {
   font-weight: 600;
@@ -708,6 +769,13 @@ input:focus { outline: none; }
 }
 
 .wx-sheet h3 { margin: 4px 0 8px; text-align: center; font-size: 16px; font-weight: 500; }
+
+.wx-sheet p:not(.wx-url) {
+  margin: 0 0 8px;
+  color: #888;
+  text-align: center;
+  font-size: 14px;
+}
 
 .wx-sheet button {
   width: 100%;

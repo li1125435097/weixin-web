@@ -44,6 +44,14 @@ export interface FriendCard {
   system: boolean;
 }
 
+export interface FriendLookup {
+  id: string;
+  username: string;
+  nickname: string;
+  displayName: string;
+  relation: 'none' | 'friend' | 'outgoing' | 'incoming';
+}
+
 export interface FriendRequestCard {
   id: string;
   fromId: string;

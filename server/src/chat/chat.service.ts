@@ -46,6 +46,14 @@ export interface FriendRequestCard {
   createdAt: number;
 }
 
+export interface FriendLookup {
+  id: string;
+  username: string;
+  nickname: string;
+  displayName: string;
+  relation: 'none' | 'friend' | 'outgoing' | 'incoming';
+}
+
 @Injectable()
 export class ChatService {
   private readonly friendHits = new Map<string, number[]>();
@@ -189,6 +197,7 @@ export class ChatService {
 
   send(conversationId: string, senderId: string, draft: ChatDraft): { message: ChatMessage; deletedIds: string[] } {
     this.assertMember(conversationId, senderId);
+    if (!draft.persist) return { message: this.ephemeral(conversationId, senderId, draft), deletedIds: [] };
     const now = Date.now();
     const id = newId('msg');
     const deletedIds = this.database.tx(() => {
@@ -245,6 +254,25 @@ export class ChatService {
     return { friends, incoming };
   }
 
+  lookupUser(userId: string, username: string): FriendLookup {
+    this.hitFriend(userId);
+    const self = this.requireFormal(userId);
+    if (self.username === username) throw new BadRequestException('不能添加自己');
+    const target = this.users.findByUsername(username);
+    if (!target || target.kind !== 'formal') throw new NotFoundException('没有这个用户');
+    let relation: FriendLookup['relation'] = 'none';
+    if (this.areFriends(userId, target.id)) relation = 'friend';
+    else if (this.pendingRequest(userId, target.id)) relation = 'outgoing';
+    else if (this.pendingRequest(target.id, userId)) relation = 'incoming';
+    return {
+      id: target.id,
+      username: target.username || username,
+      nickname: target.nickname,
+      displayName: displayNameOf(target),
+      relation,
+    };
+  }
+
   requestFriend(userId: string, username: string): void {
     this.hitFriend(userId);
     const self = this.requireFormal(userId);
@@ -256,21 +284,12 @@ export class ChatService {
     const target = this.users.findByUsername(username);
     if (!target || target.kind !== 'formal') throw new NotFoundException('没有这个用户');
     if (this.areFriends(userId, target.id)) throw new ConflictException('已经是好友');
-    const reverse = this.database.get(
-      `SELECT id FROM friend_requests WHERE from_id = ? AND to_id = ? AND status = 'pending'`,
-      target.id,
-      userId,
-    );
+    const reverse = this.pendingRequest(target.id, userId);
     if (reverse) {
-      this.accept(userId, String(reverse.id));
+      this.accept(userId, reverse);
       return;
     }
-    const pending = this.database.get(
-      `SELECT id FROM friend_requests WHERE from_id = ? AND to_id = ? AND status = 'pending'`,
-      userId,
-      target.id,
-    );
-    if (pending) throw new ConflictException('申请已发送');
+    if (this.pendingRequest(userId, target.id)) throw new ConflictException('申请已发送');
     this.database.run(
       `INSERT INTO friend_requests (id, from_id, to_id, status, created_at) VALUES (?, ?, ?, 'pending', ?)`,
       newId('fr'),
@@ -357,6 +376,25 @@ export class ChatService {
     });
   }
 
+  clearMessages(conversationId: string, userId: string): void {
+    this.assertMember(conversationId, userId);
+    this.database.run('DELETE FROM messages WHERE conversation_id = ?', conversationId);
+  }
+
+  private ephemeral(conversationId: string, senderId: string, draft: ChatDraft): ChatMessage {
+    const sender = this.users.findStored(senderId);
+    return {
+      id: newId('msg'),
+      conversationId,
+      senderId,
+      senderName: sender ? displayNameOf(sender) : '对方',
+      type: 'text',
+      content: draft.content,
+      createdAt: Date.now(),
+      read: false,
+    };
+  }
+
   private loadMessages(conversationId: string, userId: string): ChatMessage[] {
     const peerRead = this.peerReadAt(conversationId, userId);
     const rows = this.database.all(
@@ -396,6 +434,15 @@ export class ChatService {
       userId,
     );
     return row ? Number(row.last_read_at) : 0;
+  }
+
+  private pendingRequest(fromId: string, toId: string): string | null {
+    const row = this.database.get(
+      `SELECT id FROM friend_requests WHERE from_id = ? AND to_id = ? AND status = 'pending'`,
+      fromId,
+      toId,
+    );
+    return row ? String(row.id) : null;
   }
 
   private areFriends(left: string, right: string): boolean {
@@ -478,5 +525,5 @@ export class ChatService {
 function previewOf(last: Record<string, unknown> | undefined, hasPeer: boolean): string {
   if (!last) return hasPeer ? '点击开始聊天' : '邀请对方加入';
   if (last.type === 'voice') return '[语音]';
-  return String(last.content || '');
+  return String(last.content || '').replace(/[\r\n]+/g, ' ');
 }

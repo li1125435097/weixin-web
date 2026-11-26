@@ -2,8 +2,9 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { createRoom, ensureUser, listConversations } from '../api';
+import { loadArchive } from '../chat-archive';
 import { avatarColor, formatClock, initial } from '../ui';
-import type { ConversationSummary } from '../types';
+import type { ChatMessage, ConversationSummary } from '../types';
 import WxIcon from './WxIcon.vue';
 
 const props = defineProps<{ activeId?: string; liveText?: string; liveAt?: number }>();
@@ -13,27 +14,40 @@ const keyword = ref('');
 const menuOpen = ref(false);
 const error = ref('');
 let timer = 0;
+let userId = '';
 
 const shown = computed(() => {
   const key = keyword.value.trim();
   return conversations.value.filter((item) => item.title.includes(key)).slice().sort((a, b) => activity(b) - activity(a));
 });
 
+function localTail(id: string): ChatMessage | undefined {
+  if (!userId) return undefined;
+  const rows = loadArchive(userId, id);
+  return rows[rows.length - 1];
+}
+
 function activity(item: ConversationSummary): number {
-  if (props.activeId === item.id && props.liveAt) return props.liveAt;
-  return item.updatedAt;
+  const localAt = localTail(item.id)?.createdAt || 0;
+  if (props.activeId === item.id && props.liveAt) return Math.max(props.liveAt, localAt);
+  return Math.max(item.updatedAt, localAt);
 }
 
 function preview(item: ConversationSummary): string {
   if (item.roomStatus === 'ringing') return '[视频通话]';
   if (item.roomStatus === 'active') return '[通话中]';
   if (props.activeId === item.id && props.liveText) return props.liveText;
+  const tail = localTail(item.id);
+  const localText = !tail ? '' : tail.type === 'voice' ? '[语音]' : tail.content.replace(/[\r\n]+/g, ' ');
+  const placeholder = item.preview === '点击开始聊天' || item.preview === '邀请对方加入';
+  if (localText && (placeholder || (tail && tail.createdAt > item.updatedAt))) return localText;
   return item.preview;
 }
 
 async function refresh(): Promise<void> {
   try {
-    await ensureUser();
+    const user = await ensureUser();
+    userId = user.id;
     conversations.value = (await listConversations()).conversations;
   } catch {
     window.clearInterval(timer);

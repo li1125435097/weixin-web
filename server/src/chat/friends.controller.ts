@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { cleanUsername } from '../common/names';
 import { ChatService } from './chat.service';
@@ -15,6 +15,12 @@ export class FriendsController {
   list(@Req() req: Request) {
     const user = this.session.require(req);
     return this.chat.friends(user.id);
+  }
+
+  @Get('lookup')
+  lookup(@Query('username') username: unknown, @Req() req: Request) {
+    const user = this.session.requireFormal(req);
+    return this.chat.lookupUser(user.id, cleanUsername(username));
   }
 
   @Post('requests')

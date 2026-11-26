@@ -1,6 +1,7 @@
 import { onScopeDispose, ref, watch, type Ref } from 'vue';
 import { io, type Socket } from 'socket.io-client';
 import { ensureUser, fetchTurn, listMessages } from '../api';
+import { loadArchive, mergeArchives, saveArchive } from '../chat-archive';
 import type { ChatMessage } from '../types';
 
 export type Phase = 'boot' | 'chat' | 'outgoing' | 'incoming' | 'active' | 'ended';
@@ -64,6 +65,7 @@ export function useCall(
   let offerAttempts = 0;
   let activeBoot = false;
   let facing: 'user' | 'environment' = 'user';
+  let archiveUserId = '';
 
   const socket: Socket = io({
     path: `${import.meta.env.BASE_URL.replace(/\/$/, '')}/socket.io`,
@@ -114,15 +116,29 @@ export function useCall(
     ];
   }
 
+  function persistArchive(): void {
+    if (!archiveUserId) return;
+    saveArchive(archiveUserId, conversationId, messages.value);
+  }
+
+  function showHistory(server: ChatMessage[], extras: ChatMessage[] = []): void {
+    const local = loadArchive(archiveUserId, conversationId);
+    const merged = mergeArchives(server, local);
+    const notes = extras.filter((item) => item.type === 'system' && !merged.some((message) => message.id === item.id));
+    messages.value = [...merged, ...notes];
+    persistArchive();
+  }
+
   function rememberMessage(message: ChatMessage): void {
     const index = messages.value.findIndex((item) => item.id === message.id);
     if (index >= 0) {
       const next = messages.value.slice();
       next[index] = { ...next[index], ...message };
       messages.value = next;
-      return;
+    } else {
+      messages.value = [...messages.value, message];
     }
-    messages.value = [...messages.value, message];
+    if (message.type !== 'system') persistArchive();
   }
 
   function inCall(): boolean {
@@ -359,8 +375,8 @@ export function useCall(
       }
       try {
         const fresh = await listMessages(conversationId);
-        const extras = messages.value.filter((item) => item.type === 'system' && !fresh.messages.some((message) => message.id === item.id));
-        messages.value = [...fresh.messages, ...extras];
+        const extras = messages.value.filter((item) => item.type === 'system');
+        showHistory(fresh.messages, extras);
       } catch {
         /* 已有的历史先留在页面上 */
       }
@@ -496,11 +512,15 @@ export function useCall(
     if (payload?.conversationId && payload.conversationId !== conversationId) return;
     const readAt = payload?.readAt || 0;
     messages.value = messages.value.map((item) => (item.senderId === selfId.value && item.createdAt <= readAt ? { ...item, read: true } : item));
+    persistArchive();
   });
   socket.on('chat:trim', (payload: { ids?: string[] }) => {
     const ids = new Set(payload?.ids || []);
     if (ids.size === 0) return;
-    messages.value = messages.value.filter((item) => !ids.has(item.id));
+    const next = messages.value.filter((item) => !ids.has(item.id));
+    if (next.length === messages.value.length) return;
+    messages.value = next;
+    persistArchive();
   });
   socket.on('connect', () => {
     void joinConversation();
@@ -657,8 +677,14 @@ export function useCall(
 
   void (async () => {
     try {
-      await ensureUser();
-      messages.value = (await listMessages(conversationId)).messages;
+      const user = await ensureUser();
+      archiveUserId = user.id;
+      try {
+        const serverMessages = (await listMessages(conversationId)).messages;
+        showHistory(serverMessages);
+      } catch {
+        messages.value = loadArchive(archiveUserId, conversationId);
+      }
     } catch {
       /* 历史记录会在进入会话后补上 */
     }

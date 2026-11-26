@@ -9,7 +9,7 @@ REMOTE_DIR=/root/www/chat-me
 APP_PORT=5000
 NGINX_MAP=chat-me-upgrade.conf
 NGINX_LOCATION=chat-me.location.conf
-REBUILD=false
+REBUILD=true
 
 if [ "$REBUILD" = true ]; then
   echo "== 构建前端 =="

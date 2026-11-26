@@ -1,4 +1,4 @@
-import type { ChatMessage, ConversationSummary, FriendCard, FriendRequestCard, PublicUser, RoomDetail, RoomSummary } from './types';
+import type { ChatMessage, ConversationSummary, FriendCard, FriendLookup, FriendRequestCard, PublicUser, RoomDetail, RoomSummary } from './types';
 
 function withBase(path: string): string {
   const prefix = import.meta.env.BASE_URL.replace(/\/$/, '');
@@ -72,10 +72,16 @@ export const listConversations = () => api<{ conversations: ConversationSummary[
 
 export const listMessages = (conversationId: string) => api<{ messages: ChatMessage[] }>(`/api/conversations/${conversationId}/messages`);
 
+export const clearMessages = (conversationId: string) =>
+  api<{ ok: boolean }>(`/api/conversations/${conversationId}/messages`, { method: 'DELETE' });
+
 export const openDirect = (userId: string) =>
   api<ConversationSummary>('/api/conversations/direct', { method: 'POST', body: JSON.stringify({ userId }) });
 
 export const listFriends = () => api<{ friends: FriendCard[]; incoming: FriendRequestCard[] }>('/api/friends');
+
+export const lookupFriend = (username: string) =>
+  api<FriendLookup>(`/api/friends/lookup?username=${encodeURIComponent(username)}`);
 
 export const requestFriend = (username: string) =>
   api<{ ok: boolean }>('/api/friends/requests', { method: 'POST', body: JSON.stringify({ username }) });

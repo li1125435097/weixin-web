@@ -21,11 +21,17 @@
           <button type="button" aria-label="视频通话" @click="onVideo">
             <WxIcon name="video" />
           </button>
-          <button v-if="invitePath" type="button" aria-label="更多" @click="moreOpen = true">
+          <button type="button" aria-label="更多" @click.stop="menuOpen = !menuOpen">
             <WxIcon name="more" />
           </button>
         </span>
       </header>
+      <div v-if="menuOpen" class="wx-pop-mask" @click="menuOpen = false"></div>
+      <div v-if="menuOpen" class="wx-pop">
+        <button type="button" @click="askClear">清空聊天记录</button>
+        <button v-if="invitePath" type="button" @click="copyLink">复制邀请链接</button>
+        <button v-if="invitePath" class="danger" type="button" @click="closeChat">结束聊天</button>
+      </div>
       <p v-if="peerReconnecting" class="wx-banner">对方正在重连</p>
       <div ref="scroller" class="wx-msgs">
         <p v-if="messages.length === 0" class="wx-system">可以发消息、语音，或点右上角视频通话</p>
@@ -73,14 +79,16 @@
         >
           {{ holding ? '松开 结束' : '按住 说话' }}
         </button>
-        <input
+        <textarea
           v-else
           ref="inputRef"
           v-model="draft"
-          maxlength="2000"
+          rows="1"
           enterkeyhint="send"
           placeholder=""
           @focus="emojiOpen = false"
+          @keydown="onDraftKey"
+          @input="fitDraft"
         />
         <button class="wx-icon-btn" type="button" aria-label="表情" @click="toggleEmoji">
           <WxIcon :name="emojiOpen ? 'keyboard' : 'emoji'" />
@@ -144,7 +152,7 @@
     </div>
     <p v-if="toast" class="wx-toast">{{ toast }}</p>
 
-    <div v-if="shareOpen || moreOpen" class="wx-mask" @click.self="closeSheets">
+    <div v-if="shareOpen || clearAsk" class="wx-mask" @click.self="closeSheets">
       <div class="wx-sheet">
         <template v-if="shareOpen">
           <h3>对方还没进来</h3>
@@ -152,8 +160,9 @@
           <button class="wx-green" type="button" @click="copyLink">复制邀请链接</button>
         </template>
         <template v-else>
-          <button type="button" @click="copyLink">复制邀请链接</button>
-          <button class="danger" type="button" @click="closeChat">结束聊天</button>
+          <h3>清空服务器聊天记录</h3>
+          <p>只删除服务器上这条聊天的记录，本机记录仍会保留并继续显示。</p>
+          <button class="danger" type="button" :disabled="clearing" @click="confirmClear">清空</button>
         </template>
         <button type="button" @click="closeSheets">取消</button>
       </div>
@@ -168,6 +177,7 @@ import EmojiPanel from '../components/EmojiPanel.vue';
 import SessionList from '../components/SessionList.vue';
 import WxFrame from '../components/WxFrame.vue';
 import WxIcon from '../components/WxIcon.vue';
+import { clearMessages } from '../api';
 import { useCall, type DeviceState } from '../composables/useCall';
 import type { ChatMessage } from '../types';
 import { avatarColor, formatStamp, initial } from '../ui';
@@ -178,12 +188,14 @@ const conversationId = String(route.params.conversationId);
 const localVideo = ref<HTMLVideoElement | null>(null);
 const remoteVideo = ref<HTMLVideoElement | null>(null);
 const scroller = ref<HTMLElement | null>(null);
-const inputRef = ref<HTMLInputElement | null>(null);
+const inputRef = ref<HTMLTextAreaElement | null>(null);
 const draft = ref('');
 const emojiOpen = ref(false);
 const voiceMode = ref(false);
 const shareOpen = ref(false);
-const moreOpen = ref(false);
+const menuOpen = ref(false);
+const clearAsk = ref(false);
+const clearing = ref(false);
 const holding = ref(false);
 const canceling = ref(false);
 const pressed = ref(false);
@@ -247,7 +259,7 @@ const liveText = computed(() => {
   const last = messages.value[messages.value.length - 1];
   if (!last) return '';
   if (last.type === 'voice') return '[语音]';
-  return last.content;
+  return last.content.replace(/[\r\n]+/g, ' ');
 });
 const liveAt = computed(() => messages.value[messages.value.length - 1]?.createdAt || 0);
 const durationText = computed(() => {
@@ -260,6 +272,10 @@ const durationText = computed(() => {
 const deviceLine = computed(() => {
   const parts = [devicePhrase('摄像头', camState.value), devicePhrase('麦克风', micState.value)].filter(Boolean);
   return parts.join(' · ');
+});
+
+watch(draft, () => {
+  void nextTick(fitDraft);
 });
 
 watch(
@@ -376,6 +392,19 @@ function toggleEmoji(): void {
   }
 }
 
+function onDraftKey(event: KeyboardEvent): void {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  void send();
+}
+
+function fitDraft(): void {
+  const el = inputRef.value;
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+}
+
 function insertEmoji(emoji: string): void {
   const el = inputRef.value;
   const start = el?.selectionStart ?? draft.value.length;
@@ -394,7 +423,10 @@ function backspace(): void {
 
 async function send(): Promise<void> {
   const text = draft.value;
-  if (await sendChat(text)) draft.value = '';
+  if (await sendChat(text)) {
+    draft.value = '';
+    void nextTick(fitDraft);
+  }
 }
 
 async function copyLink(): Promise<void> {
@@ -414,16 +446,35 @@ async function copyLink(): Promise<void> {
   }
   notice.value = '邀请链接已复制';
   shareOpen.value = false;
-  moreOpen.value = false;
+  menuOpen.value = false;
 }
 
 function closeSheets(): void {
   shareOpen.value = false;
-  moreOpen.value = false;
+  clearAsk.value = false;
+}
+
+function askClear(): void {
+  menuOpen.value = false;
+  clearAsk.value = true;
+}
+
+async function confirmClear(): Promise<void> {
+  if (clearing.value) return;
+  clearing.value = true;
+  try {
+    await clearMessages(conversationId);
+    clearAsk.value = false;
+    notice.value = '已清空服务器聊天记录';
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '清空失败';
+  } finally {
+    clearing.value = false;
+  }
 }
 
 async function closeChat(): Promise<void> {
-  moreOpen.value = false;
+  menuOpen.value = false;
   const ok = await closeRoom();
   if (ok) await router.push('/');
 }
