@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { displayNameOf, isAdminUsername, TEXT_QUOTA, textUnits, VOICE_QUOTA } from '../common/admin';
+import { displayNameOf, FILE_QUOTA, IMAGE_QUOTA, isAdminUsername, TEXT_QUOTA, textUnits, VOICE_QUOTA } from '../common/admin';
 import { newId } from '../common/ids';
 import { DatabaseService } from '../db/database.service';
 import { ChatDraft } from '../messages/chat-policy';
@@ -11,11 +11,12 @@ export interface ChatMessage {
   conversationId: string;
   senderId: string;
   senderName: string;
-  type: 'text' | 'voice';
+  type: 'text' | 'voice' | 'image' | 'file';
   content: string;
   createdAt: number;
   durationMs?: number;
   mime?: string;
+  name?: string;
   read: boolean;
 }
 
@@ -127,7 +128,7 @@ export class ChatService {
       const id = String(row.id);
       const peer = this.peer(id, userId);
       const last = this.database.get(
-        `SELECT sender_id, type, content FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
+        `SELECT sender_id, type, content, name FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
         id,
       );
       const unread = this.database.get(
@@ -202,8 +203,8 @@ export class ChatService {
     const id = newId('msg');
     const deletedIds = this.database.tx(() => {
       this.database.run(
-        `INSERT INTO messages (id, conversation_id, sender_id, type, content, created_at, duration_ms, mime)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, conversation_id, sender_id, type, content, created_at, duration_ms, mime, name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id,
         conversationId,
         senderId,
@@ -212,6 +213,7 @@ export class ChatService {
         now,
         draft.durationMs ?? null,
         draft.mime ?? null,
+        draft.name ?? null,
       );
       this.database.run('UPDATE conversations SET updated_at = ? WHERE id = ?', now, conversationId);
       return this.enforceQuota(senderId);
@@ -398,7 +400,7 @@ export class ChatService {
   private loadMessages(conversationId: string, userId: string): ChatMessage[] {
     const peerRead = this.peerReadAt(conversationId, userId);
     const rows = this.database.all(
-      `SELECT id, conversation_id, sender_id, type, content, created_at, duration_ms, mime
+      `SELECT id, conversation_id, sender_id, type, content, created_at, duration_ms, mime, name
        FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, id ASC`,
       conversationId,
     );
@@ -410,13 +412,14 @@ export class ChatService {
         conversationId,
         senderId,
         senderName: sender ? displayNameOf(sender) : '对方',
-        type: row.type === 'voice' ? 'voice' : 'text',
+        type: messageType(row.type),
         content: String(row.content),
         createdAt: Number(row.created_at),
         read: senderId === userId && peerRead >= Number(row.created_at),
       };
       if (row.duration_ms != null) message.durationMs = Number(row.duration_ms);
       if (row.mime != null) message.mime = String(row.mime);
+      if (row.name != null && String(row.name)) message.name = String(row.name);
       return message;
     });
   }
@@ -500,13 +503,22 @@ export class ChatService {
       this.database.run('DELETE FROM messages WHERE id = ?', id);
       deleted.push(id);
     }
-    const voices = this.database.all(
-      `SELECT id FROM messages WHERE sender_id = ? AND type = 'voice' ORDER BY created_at ASC, id ASC`,
+    deleted.push(...this.trimCount(senderId, 'voice', VOICE_QUOTA));
+    deleted.push(...this.trimCount(senderId, 'image', IMAGE_QUOTA));
+    deleted.push(...this.trimCount(senderId, 'file', FILE_QUOTA));
+    return deleted;
+  }
+
+  private trimCount(senderId: string, type: 'voice' | 'image' | 'file', quota: number): string[] {
+    const rows = this.database.all(
+      `SELECT id FROM messages WHERE sender_id = ? AND type = ? ORDER BY created_at ASC, id ASC`,
       senderId,
+      type,
     );
-    const extra = voices.length - VOICE_QUOTA;
+    const deleted: string[] = [];
+    const extra = rows.length - quota;
     for (let index = 0; index < extra; index += 1) {
-      const id = String(voices[index].id);
+      const id = String(rows[index].id);
       this.database.run('DELETE FROM messages WHERE id = ?', id);
       deleted.push(id);
     }
@@ -522,8 +534,18 @@ export class ChatService {
   }
 }
 
+function messageType(value: unknown): 'text' | 'voice' | 'image' | 'file' {
+  if (value === 'voice' || value === 'image' || value === 'file') return value;
+  return 'text';
+}
+
 function previewOf(last: Record<string, unknown> | undefined, hasPeer: boolean): string {
   if (!last) return hasPeer ? '点击开始聊天' : '邀请对方加入';
   if (last.type === 'voice') return '[语音]';
+  if (last.type === 'image') return '[图片]';
+  if (last.type === 'file') {
+    const name = typeof last.name === 'string' ? last.name : '';
+    return name ? `[文件] ${name}` : '[文件]';
+  }
   return String(last.content || '').replace(/[\r\n]+/g, ' ');
 }

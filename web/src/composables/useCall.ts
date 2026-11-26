@@ -1,7 +1,7 @@
 import { onScopeDispose, ref, watch, type Ref } from 'vue';
 import { io, type Socket } from 'socket.io-client';
 import { ensureUser, fetchTurn, listMessages } from '../api';
-import { loadArchive, mergeArchives, saveArchive } from '../chat-archive';
+import { clearArchive, clearLocalCutoff, loadArchive, localCutoff, mergeArchives, saveArchive, setLocalCutoff } from '../chat-archive';
 import type { ChatMessage } from '../types';
 
 export type Phase = 'boot' | 'chat' | 'outgoing' | 'incoming' | 'active' | 'ended';
@@ -26,7 +26,7 @@ interface Ack {
 }
 
 export function useCall(
-  conversationId: string,
+  conversationId: Ref<string>,
   video: { local: Ref<HTMLVideoElement | null>; remote: Ref<HTMLVideoElement | null> },
 ) {
   const phase = ref<Phase>('boot');
@@ -66,6 +66,29 @@ export function useCall(
   let activeBoot = false;
   let facing: 'user' | 'environment' = 'user';
   let archiveUserId = '';
+  let epoch = 0;
+  let historyToken = 0;
+  let signalGen = 0;
+  let liveSignal = 0;
+  let retiredRoomId = '';
+
+  function currentId(): string {
+    return conversationId.value;
+  }
+
+  function sameRoom(payload?: { roomId?: string }): boolean {
+    const roomId = payload?.roomId || '';
+    if (roomId && roomId === retiredRoomId) return false;
+    if (roomId && activeRoomId && roomId !== activeRoomId) return false;
+    if (!roomId && retiredRoomId) return false;
+    return true;
+  }
+
+  function visibleMessages(rows: ChatMessage[], id: string): ChatMessage[] {
+    const cut = localCutoff(archiveUserId, id);
+    if (!cut) return rows;
+    return rows.filter((item) => item.type === 'system' || item.createdAt > cut);
+  }
 
   const socket: Socket = io({
     path: `${import.meta.env.BASE_URL.replace(/\/$/, '')}/socket.io`,
@@ -118,18 +141,21 @@ export function useCall(
 
   function persistArchive(): void {
     if (!archiveUserId) return;
-    saveArchive(archiveUserId, conversationId, messages.value);
+    saveArchive(archiveUserId, currentId(), messages.value);
   }
 
   function showHistory(server: ChatMessage[], extras: ChatMessage[] = []): void {
-    const local = loadArchive(archiveUserId, conversationId);
-    const merged = mergeArchives(server, local);
+    const id = currentId();
+    const local = visibleMessages(loadArchive(archiveUserId, id), id);
+    const merged = mergeArchives(visibleMessages(server, id), local);
     const notes = extras.filter((item) => item.type === 'system' && !merged.some((message) => message.id === item.id));
     messages.value = [...merged, ...notes];
     persistArchive();
   }
 
   function rememberMessage(message: ChatMessage): void {
+    const cut = localCutoff(archiveUserId, currentId());
+    if (cut && message.type !== 'system' && message.createdAt <= cut) return;
     const index = messages.value.findIndex((item) => item.id === message.id);
     if (index >= 0) {
       const next = messages.value.slice();
@@ -309,6 +335,7 @@ export function useCall(
   }
 
   function beginActive(): void {
+    liveSignal = signalGen;
     status.value = 'active';
     phase.value = 'active';
     if (activeBoot) return;
@@ -365,28 +392,34 @@ export function useCall(
     phase.value = 'chat';
   }
 
-  async function joinConversation(): Promise<void> {
+  async function joinConversation(gen = epoch): Promise<void> {
+    const id = currentId();
+    const token = historyToken;
     try {
-      const result = await emitAck<Ack>('conversation:join', { conversationId });
+      const result = await emitAck<Ack>('conversation:join', { conversationId: id });
+      if (gen !== epoch || id !== currentId()) return;
       if (!result.ok) {
         endedReason.value = result.message || '无法进入聊天';
         phase.value = 'ended';
         return;
       }
       try {
-        const fresh = await listMessages(conversationId);
+        const fresh = await listMessages(id);
+        if (gen !== epoch || token !== historyToken || id !== currentId()) return;
         const extras = messages.value.filter((item) => item.type === 'system');
         showHistory(fresh.messages, extras);
       } catch {
         /* 已有的历史先留在页面上 */
       }
     } catch (err) {
+      if (gen !== epoch || id !== currentId()) return;
       endedReason.value = err instanceof Error ? err.message : '无法进入聊天';
       phase.value = 'ended';
     }
   }
 
   socket.on('conversation:state', (data: ConversationState) => {
+    if (data.conversationId && data.conversationId !== currentId()) return;
     selfId.value = data.selfId;
     selfName.value = data.selfName || selfName.value;
     if (data.peerName) peerName.value = data.peerName;
@@ -410,7 +443,9 @@ export function useCall(
     }
     if (phase.value === 'boot') phase.value = 'chat';
   });
-  socket.on('room:joined', (data: JoinState & { roomId?: string }) => {
+  socket.on('room:joined', (data: JoinState & { roomId?: string; conversationId?: string }) => {
+    if (data.conversationId && data.conversationId !== currentId()) return;
+    if (!sameRoom(data)) return;
     if (data.roomId) {
       activeRoomId = data.roomId;
       if (data.role === 'owner') invitePath.value = `/join/${data.roomId}`;
@@ -418,6 +453,7 @@ export function useCall(
     applyJoin(data);
   });
   socket.on('call:incoming', (payload: { callerName?: string; roomId?: string }) => {
+    if (!sameRoom(payload)) return;
     if (payload?.roomId) activeRoomId = payload.roomId;
     if (payload?.callerName) peerName.value = payload.callerName;
     peerOnline.value = true;
@@ -427,14 +463,19 @@ export function useCall(
     phase.value = 'incoming';
   });
   socket.on('call:outgoing', (payload?: { roomId?: string }) => {
+    if (!sameRoom(payload)) return;
     if (payload?.roomId) activeRoomId = payload.roomId;
     if (phase.value === 'incoming') return;
     status.value = 'ringing';
     phase.value = 'outgoing';
     void ensureMedia();
   });
-  socket.on('call:accept', () => beginActive());
-  socket.on('call:reject', (payload: { by?: string }) => {
+  socket.on('call:accept', (payload?: { roomId?: string }) => {
+    if (!sameRoom(payload)) return;
+    beginActive();
+  });
+  socket.on('call:reject', (payload: { by?: string; roomId?: string }) => {
+    if (!sameRoom(payload)) return;
     const by = payload?.by;
     let text = '通话已取消';
     if (by === 'timeout') text = phase.value === 'outgoing' ? '对方无应答' : '未接听';
@@ -444,7 +485,8 @@ export function useCall(
     else text = '对方已拒绝';
     leaveCall(text);
   });
-  socket.on('call:end', (payload: { reason?: string }) => {
+  socket.on('call:end', (payload: { reason?: string; roomId?: string }) => {
+    if (!sameRoom(payload)) return;
     const reason = payload?.reason;
     if (reason === 'replaced') {
       finish('replaced');
@@ -458,30 +500,36 @@ export function useCall(
     }
     leaveCall(reason === 'call-ended' ? '通话结束' : '通话结束');
   });
-  socket.on('room:ended', () => {
+  socket.on('room:ended', (payload?: { roomId?: string }) => {
+    if (!sameRoom(payload)) return;
     activeRoomId = '';
     peerReconnecting.value = false;
     if (inCall()) leaveCall('通话已结束');
   });
-  socket.on('conversation:gone', () => {
+  socket.on('conversation:gone', (payload?: { roomId?: string }) => {
+    if (!sameRoom(payload)) return;
     finish('closed');
   });
-  socket.on('peer:reconnecting', () => {
+  socket.on('peer:reconnecting', (payload?: { roomId?: string }) => {
+    if (!sameRoom(payload)) return;
     peerReconnecting.value = true;
     notice.value = '对方网络不稳定，正在等待重连';
   });
-  socket.on('peer:online', (payload: { name?: string }) => {
+  socket.on('peer:online', (payload: { name?: string; conversationId?: string }) => {
+    if (payload?.conversationId && payload.conversationId !== currentId()) return;
     peerReconnecting.value = false;
     peerOnline.value = true;
     peerJoined.value = true;
     if (payload?.name && !peerName.value) peerName.value = payload.name;
     if (role.value === 'guest' && status.value === 'active') void lock(() => createOffer());
   });
-  socket.on('peer:offline', () => {
+  socket.on('peer:offline', (payload?: { conversationId?: string }) => {
+    if (payload?.conversationId && payload.conversationId !== currentId()) return;
     peerOnline.value = false;
   });
   socket.on('webrtc:offer', (payload: { sdp?: RTCSessionDescriptionInit }) => {
-    if (payload?.sdp) {
+    if (signalGen !== liveSignal || !payload?.sdp) return;
+    {
       void lock(async () => {
         try {
           await applyOffer(payload.sdp as RTCSessionDescriptionInit);
@@ -492,7 +540,7 @@ export function useCall(
     }
   });
   socket.on('webrtc:answer', (payload: { sdp?: RTCSessionDescriptionInit }) => {
-    if (!payload?.sdp) return;
+    if (signalGen !== liveSignal || !payload?.sdp) return;
     void lock(async () => {
       if (!pc) return;
       await pc.setRemoteDescription(payload.sdp as RTCSessionDescriptionInit);
@@ -500,16 +548,24 @@ export function useCall(
     });
   });
   socket.on('webrtc:ice', (payload: { candidate?: RTCIceCandidateInit }) => {
-    if (!payload?.candidate) return;
+    if (signalGen !== liveSignal || !payload?.candidate) return;
     if (!pc || !pc.remoteDescription) pendingIce.push(payload.candidate);
     else void pc.addIceCandidate(payload.candidate).catch(() => undefined);
   });
   socket.on('chat:new', (message: ChatMessage) => {
-    if (message.conversationId && message.conversationId !== conversationId) return;
+    if (message.conversationId && message.conversationId !== currentId()) return;
     rememberMessage(message);
   });
+  socket.on('chat:cleared', (payload: { conversationId?: string }) => {
+    const id = payload?.conversationId || '';
+    if (!id) return;
+    historyToken += 1;
+    clearLocalCutoff(archiveUserId, id);
+    clearArchive(archiveUserId, id);
+    if (id === currentId()) messages.value = [];
+  });
   socket.on('chat:read', (payload: { conversationId?: string; readAt?: number }) => {
-    if (payload?.conversationId && payload.conversationId !== conversationId) return;
+    if (payload?.conversationId && payload.conversationId !== currentId()) return;
     const readAt = payload?.readAt || 0;
     messages.value = messages.value.map((item) => (item.senderId === selfId.value && item.createdAt <= readAt ? { ...item, read: true } : item));
     persistArchive();
@@ -523,7 +579,7 @@ export function useCall(
     persistArchive();
   });
   socket.on('connect', () => {
-    void joinConversation();
+    void joinConversation(epoch);
   });
   socket.on('disconnect', () => {
     activeBoot = false;
@@ -646,6 +702,39 @@ export function useCall(
     }
   }
 
+  async function sendMedia(payload: { type: 'image' | 'file'; content: string; mime: string; name?: string }): Promise<boolean> {
+    if (payload.content.length > 1_000_000) {
+      error.value = payload.type === 'image' ? '图片太大' : '文件太大';
+      return false;
+    }
+    try {
+      const result = await emitAck<Ack>('chat:send', payload);
+      if (!result.ok) {
+        error.value = result.message || '发送失败';
+        return false;
+      }
+      return true;
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : '发送失败';
+      return false;
+    }
+  }
+
+  function clearLocalHistory(): void {
+    historyToken += 1;
+    const id = currentId();
+    setLocalCutoff(archiveUserId, id, Date.now());
+    clearArchive(archiveUserId, id);
+    messages.value = [];
+  }
+
+  function wipeHistory(id = currentId()): void {
+    historyToken += 1;
+    clearLocalCutoff(archiveUserId, id);
+    clearArchive(archiveUserId, id);
+    if (id === currentId()) messages.value = [];
+  }
+
   async function sendVoice(content: string, durationMs: number, mime: string): Promise<boolean> {
     if (content.length > 400_000) {
       error.value = '语音太长';
@@ -675,21 +764,59 @@ export function useCall(
     stopMedia();
   });
 
-  void (async () => {
+  async function openConversation(id: string): Promise<void> {
+    const gen = ++epoch;
+    signalGen += 1;
+    if (activeRoomId) retiredRoomId = activeRoomId;
+    const keepShell = phase.value === 'chat' || inCall();
+    if (inCall()) {
+      if (phase.value === 'incoming') await reject();
+      else await hangup();
+    }
+    if (gen !== epoch || id !== currentId()) return;
+    activeBoot = false;
+    connectedAt.value = 0;
+    resetPc();
+    stopMedia();
+    activeRoomId = '';
+    role.value = null;
+    status.value = 'waiting';
+    peerName.value = '';
+    peerOnline.value = false;
+    peerJoined.value = false;
+    invitePath.value = null;
+    peerReconnecting.value = false;
+    endedReason.value = '';
+    endedCode.value = '';
+    error.value = '';
+    messages.value = [];
+    phase.value = keepShell ? 'chat' : 'boot';
+    const token = historyToken;
     try {
-      const user = await ensureUser();
-      archiveUserId = user.id;
+      if (!archiveUserId) {
+        const user = await ensureUser();
+        if (gen !== epoch || id !== currentId()) return;
+        archiveUserId = user.id;
+      }
       try {
-        const serverMessages = (await listMessages(conversationId)).messages;
+        const serverMessages = (await listMessages(id)).messages;
+        if (gen !== epoch || token !== historyToken || id !== currentId()) return;
         showHistory(serverMessages);
       } catch {
-        messages.value = loadArchive(archiveUserId, conversationId);
+        if (gen !== epoch || token !== historyToken || id !== currentId()) return;
+        messages.value = visibleMessages(loadArchive(archiveUserId, id), id);
       }
     } catch {
       /* 历史记录会在进入会话后补上 */
     }
-    socket.connect();
-  })();
+    if (gen !== epoch || id !== currentId()) return;
+    if (socket.connected) await joinConversation(gen);
+    else socket.connect();
+  }
+
+  watch(conversationId, (id) => {
+    if (id) void openConversation(id);
+  }, { immediate: true });
 
   return {
     phase,
@@ -726,10 +853,14 @@ export function useCall(
     flipCam,
     sendChat,
     sendVoice,
+    sendMedia,
+    clearLocalHistory,
+    wipeHistory,
   };
 }
 
 interface ConversationState extends JoinState {
+  conversationId?: string;
   selfId: string;
   peerJoined: boolean;
   invitePath: string | null;

@@ -76,6 +76,16 @@ export class SignalingGateway implements OnGatewayInit, OnGatewayDisconnect, OnM
       const conversationId = typeof body?.conversationId === 'string' ? body.conversationId : '';
       this.chat.assertMember(conversationId, user.id);
       const name = displayNameOf(user);
+      const previous = this.metas.get(client.id);
+      if (previous && previous.conversationId !== conversationId) {
+        if (previous.roomId && previous.role) this.rooms.detach(previous.roomId, previous.role, client.id);
+        const oldPeerId = this.chat.memberIds(previous.conversationId).find((id) => id !== user.id);
+        const stillHere = this.realtime.userSockets(user.id).some((socketId) => {
+          if (socketId === client.id) return false;
+          return this.metas.get(socketId)?.conversationId === previous.conversationId;
+        });
+        if (oldPeerId && !stillHere) this.realtime.toUser(oldPeerId, 'peer:offline', { conversationId: previous.conversationId });
+      }
       this.metas.set(client.id, { conversationId, userId: user.id, name });
       this.realtime.bindUser(user.id, client.id);
       const summary = this.chat.list(user.id).find((item) => item.id === conversationId);
@@ -225,6 +235,7 @@ export class SignalingGateway implements OnGatewayInit, OnGatewayDisconnect, OnM
     }
     const payload = {
       roomId: room.id,
+      conversationId: room.conversationId,
       role,
       status: room.status,
       reconnected: attached.reconnected,

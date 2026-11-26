@@ -99,12 +99,17 @@ export class DatabaseService implements OnModuleDestroy {
         content TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         duration_ms INTEGER,
-        mime TEXT
+        mime TEXT,
+        name TEXT
       );
       CREATE INDEX IF NOT EXISTS messages_conv ON messages(conversation_id, created_at);
       CREATE INDEX IF NOT EXISTS messages_sender ON messages(sender_id, type, created_at);
       CREATE INDEX IF NOT EXISTS users_temp_expiry ON users(kind, expires_at);
     `);
+    const columns = this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'name')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN name TEXT');
+    }
   }
 
   private importUsers(file: string): void {

@@ -2,8 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { createRoom, ensureUser, listConversations } from '../api';
-import { loadArchive } from '../chat-archive';
-import { avatarColor, formatClock, initial } from '../ui';
+import { loadArchive, localCutoff } from '../chat-archive';
+import { avatarColor, formatClock, initial, messagePreview } from '../ui';
 import type { ChatMessage, ConversationSummary } from '../types';
 import WxIcon from './WxIcon.vue';
 
@@ -37,8 +37,10 @@ function preview(item: ConversationSummary): string {
   if (item.roomStatus === 'ringing') return '[视频通话]';
   if (item.roomStatus === 'active') return '[通话中]';
   if (props.activeId === item.id && props.liveText) return props.liveText;
+  const cut = localCutoff(userId, item.id);
+  if (cut && item.updatedAt <= cut) return item.kind === 'invite' && !item.peerId ? '邀请对方加入' : '点击开始聊天';
   const tail = localTail(item.id);
-  const localText = !tail ? '' : tail.type === 'voice' ? '[语音]' : tail.content.replace(/[\r\n]+/g, ' ');
+  const localText = tail && tail.createdAt > cut ? messagePreview(tail) : '';
   const placeholder = item.preview === '点击开始聊天' || item.preview === '邀请对方加入';
   if (localText && (placeholder || (tail && tail.createdAt > item.updatedAt))) return localText;
   return item.preview;

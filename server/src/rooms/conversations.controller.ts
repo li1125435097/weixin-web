@@ -42,6 +42,9 @@ export class ConversationsController {
   clearMessages(@Param('id') id: string, @Req() req: Request) {
     const user = this.session.require(req);
     this.chat.clearMessages(id, user.id);
+    for (const memberId of this.chat.memberIds(id)) {
+      this.realtime.toUser(memberId, 'chat:cleared', { conversationId: id });
+    }
     return { ok: true };
   }
 

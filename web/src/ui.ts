@@ -17,6 +17,13 @@ export function formatClock(value: number): string {
   return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 }
 
+export function messagePreview(message: { type: string; content: string; name?: string }): string {
+  if (message.type === 'voice') return '[语音]';
+  if (message.type === 'image') return '[图片]';
+  if (message.type === 'file') return message.name ? `[文件] ${message.name}` : '[文件]';
+  return message.content.replace(/[\r\n]+/g, ' ');
+}
+
 export function formatStamp(value: number): string {
   if (!value) return '';
   const date = new Date(value);

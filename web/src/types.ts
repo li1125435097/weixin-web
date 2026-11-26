@@ -12,11 +12,12 @@ export interface ChatMessage {
   conversationId?: string;
   senderId: string;
   senderName: string;
-  type: 'text' | 'voice' | 'system';
+  type: 'text' | 'voice' | 'image' | 'file' | 'system';
   content: string;
   createdAt: number;
   durationMs?: number;
   mime?: string;
+  name?: string;
   read?: boolean;
 }
 

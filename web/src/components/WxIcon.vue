@@ -48,5 +48,14 @@ defineProps<{ name: string }>();
       <path d="m14 11 5-3v8l-5-3z" />
     </template>
     <path v-else-if="name === 'plus'" d="M12 6v12M6 12h12" />
+    <template v-else-if="name === 'image'">
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <circle cx="9" cy="10" r="1.4" fill="currentColor" stroke="none" />
+      <path d="m5 16 4.2-4 2.6 2.4L15 11l4 5" />
+    </template>
+    <template v-else-if="name === 'file'">
+      <path d="M7 4h6l4 4v12H7z" />
+      <path d="M13 4v4h4M9 13h6M9 16h6" />
+    </template>
   </svg>
 </template>

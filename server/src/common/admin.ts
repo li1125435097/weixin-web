@@ -1,6 +1,8 @@
 export const ADMIN_USERNAME = 'lijinke';
 export const TEXT_QUOTA = 30_000;
 export const VOICE_QUOTA = 20;
+export const IMAGE_QUOTA = 30;
+export const FILE_QUOTA = 30;
 export const TEMP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const TOUCH_GAP_MS = 60 * 60 * 1000;
 

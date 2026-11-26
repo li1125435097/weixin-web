@@ -28,12 +28,13 @@
       </header>
       <div v-if="menuOpen" class="wx-pop-mask" @click="menuOpen = false"></div>
       <div v-if="menuOpen" class="wx-pop">
-        <button type="button" @click="askClear">清空聊天记录</button>
+        <button type="button" @click="askClear('local')">清空本地聊天记录</button>
+        <button type="button" @click="askClear('all')">清空全部聊天记录</button>
         <button v-if="invitePath" type="button" @click="copyLink">复制邀请链接</button>
         <button v-if="invitePath" class="danger" type="button" @click="closeChat">结束聊天</button>
       </div>
       <p v-if="peerReconnecting" class="wx-banner">对方正在重连</p>
-      <div ref="scroller" class="wx-msgs">
+      <div ref="scroller" class="wx-msgs" @scroll="onMsgsScroll">
         <p v-if="messages.length === 0" class="wx-system">可以发消息、语音，或点右上角视频通话</p>
         <section v-if="invitePath && !peerJoined" class="wx-invite">
           <p>把链接发给对方，打开就能聊天、发语音、打视频。对方不在线也能收到消息。</p>
@@ -56,13 +57,25 @@
                 <i :class="{ playing: playingId === message.id }"></i>
                 <span>{{ voiceSeconds(message) }}"</span>
               </button>
+              <img
+                v-else-if="message.type === 'image'"
+                class="wx-photo"
+                :src="binaryUrl(message)"
+                alt="图片"
+                @load="stickToBottom"
+              />
+              <button v-else-if="message.type === 'file'" type="button" class="wx-file" @click="downloadFile(message)">
+                <strong>{{ message.name || '文件' }}</strong>
+                <small>点击下载</small>
+              </button>
               <p v-else class="wx-bubble">{{ message.content }}</p>
+              <button v-if="message.type === 'text'" type="button" class="wx-copy" @click="copyMessage(message)">复制</button>
               <em v-if="message.senderId === selfId" class="wx-read" :class="{ on: message.read }">{{ message.read ? '已读' : '未读' }}</em>
             </div>
           </div>
         </template>
       </div>
-      <form class="wx-compose" :class="{ safe: !emojiOpen }" @submit.prevent="send">
+      <form class="wx-compose" :class="{ safe: !emojiOpen && !plusOpen }" @submit.prevent="send">
         <button class="wx-icon-btn" type="button" :aria-label="voiceMode ? '键盘' : '语音'" @click="toggleVoice">
           <WxIcon :name="voiceMode ? 'keyboard' : 'mic'" />
         </button>
@@ -86,7 +99,7 @@
           rows="1"
           enterkeyhint="send"
           placeholder=""
-          @focus="emojiOpen = false"
+          @focus="emojiOpen = false; plusOpen = false"
           @keydown="onDraftKey"
           @input="fitDraft"
         />
@@ -94,8 +107,23 @@
           <WxIcon :name="emojiOpen ? 'keyboard' : 'emoji'" />
         </button>
         <button v-if="draft.trim()" class="wx-send" type="submit">发送</button>
+        <button v-else class="wx-icon-btn" type="button" aria-label="更多功能" @click="togglePlus">
+          <WxIcon name="plus" />
+        </button>
       </form>
       <EmojiPanel v-if="emojiOpen" @pick="insertEmoji" @backspace="backspace" />
+      <div v-if="plusOpen" class="wx-plus">
+        <button type="button" @click="imageInput?.click()">
+          <span class="wx-plus-face"><WxIcon name="image" /></span>
+          <span>图片</span>
+        </button>
+        <button type="button" @click="fileInput?.click()">
+          <span class="wx-plus-face"><WxIcon name="file" /></span>
+          <span>文件</span>
+        </button>
+      </div>
+      <input ref="imageInput" class="wx-file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp" @change="onImage" />
+      <input ref="fileInput" class="wx-file-input" type="file" @change="onFile" />
     </section>
 
     <div v-if="inCall" class="wx-call" :class="phase">
@@ -160,8 +188,9 @@
           <button class="wx-green" type="button" @click="copyLink">复制邀请链接</button>
         </template>
         <template v-else>
-          <h3>清空服务器聊天记录</h3>
-          <p>只删除服务器上这条聊天的记录，本机记录仍会保留并继续显示。</p>
+          <h3>{{ clearAsk === 'local' ? '清空本地聊天记录' : '清空全部聊天记录' }}</h3>
+          <p v-if="clearAsk === 'local'">只删除这台设备上的记录。服务器上的消息还在，但这台设备不再显示。</p>
+          <p v-else>同时删除服务器和这台设备上的记录，对方打开这个聊天也会被清掉。</p>
           <button class="danger" type="button" :disabled="clearing" @click="confirmClear">清空</button>
         </template>
         <button type="button" @click="closeSheets">取消</button>
@@ -180,11 +209,11 @@ import WxIcon from '../components/WxIcon.vue';
 import { clearMessages } from '../api';
 import { useCall, type DeviceState } from '../composables/useCall';
 import type { ChatMessage } from '../types';
-import { avatarColor, formatStamp, initial } from '../ui';
+import { avatarColor, formatStamp, initial, messagePreview } from '../ui';
 
 const route = useRoute();
 const router = useRouter();
-const conversationId = String(route.params.conversationId);
+const conversationId = computed(() => String(route.params.conversationId || ''));
 const localVideo = ref<HTMLVideoElement | null>(null);
 const remoteVideo = ref<HTMLVideoElement | null>(null);
 const scroller = ref<HTMLElement | null>(null);
@@ -194,7 +223,11 @@ const emojiOpen = ref(false);
 const voiceMode = ref(false);
 const shareOpen = ref(false);
 const menuOpen = ref(false);
-const clearAsk = ref(false);
+const clearAsk = ref<'' | 'local' | 'all'>('');
+const plusOpen = ref(false);
+const pinBottom = ref(true);
+const imageInput = ref<HTMLInputElement | null>(null);
+const fileInput = ref<HTMLInputElement | null>(null);
 const clearing = ref(false);
 const holding = ref(false);
 const canceling = ref(false);
@@ -243,6 +276,9 @@ const {
   flipCam,
   sendChat,
   sendVoice,
+  sendMedia,
+  clearLocalHistory,
+  wipeHistory,
 } = useCall(conversationId, { local: localVideo, remote: remoteVideo });
 
 const mobileQuery = window.matchMedia('(max-width: 899px), (hover: none) and (pointer: coarse)');
@@ -257,9 +293,8 @@ const link = computed(() => {
 });
 const liveText = computed(() => {
   const last = messages.value[messages.value.length - 1];
-  if (!last) return '';
-  if (last.type === 'voice') return '[语音]';
-  return last.content.replace(/[\r\n]+/g, ' ');
+  if (!last || last.type === 'system') return '';
+  return messagePreview(last);
 });
 const liveAt = computed(() => messages.value[messages.value.length - 1]?.createdAt || 0);
 const durationText = computed(() => {
@@ -278,12 +313,40 @@ watch(draft, () => {
   void nextTick(fitDraft);
 });
 
+watch(conversationId, () => {
+  pinBottom.value = true;
+  draft.value = '';
+  emojiOpen.value = false;
+  plusOpen.value = false;
+  menuOpen.value = false;
+  shareOpen.value = false;
+  clearAsk.value = '';
+  audio.pause();
+  playingId.value = null;
+  urls.forEach((url) => URL.revokeObjectURL(url));
+  urls.clear();
+  if (holding.value || pressed.value) {
+    pressed.value = false;
+    holding.value = false;
+    canceling.value = true;
+    holdGen += 1;
+    window.clearTimeout(maxTimer);
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    recordStream?.getTracks().forEach((track) => track.stop());
+    recorder = null;
+    recordStream = null;
+  }
+});
+
 watch(
-  () => messages.value.length,
-  async () => {
-    await nextTick();
-    scroller.value?.scrollTo({ top: scroller.value.scrollHeight });
+  () => [conversationId.value, phase.value, messages.value.length, messages.value[messages.value.length - 1]?.id] as const,
+  ([id, current], previous) => {
+    if (current === 'boot' || current === 'ended') return;
+    const entered = !previous || previous[0] !== id || previous[1] === 'boot' || previous[1] === 'ended';
+    if (entered) pinBottom.value = true;
+    stickToBottom();
   },
+  { flush: 'post' },
 );
 
 watch([notice, error], () => {
@@ -382,14 +445,36 @@ function onVideo(): void {
 function toggleVoice(): void {
   voiceMode.value = !voiceMode.value;
   emojiOpen.value = false;
+  plusOpen.value = false;
 }
 
 function toggleEmoji(): void {
   emojiOpen.value = !emojiOpen.value;
   if (emojiOpen.value) {
+    plusOpen.value = false;
     voiceMode.value = false;
     inputRef.value?.blur();
   }
+}
+
+function togglePlus(): void {
+  plusOpen.value = !plusOpen.value;
+  if (plusOpen.value) {
+    emojiOpen.value = false;
+    inputRef.value?.blur();
+  }
+}
+
+function stickToBottom(): void {
+  const el = scroller.value;
+  if (!el || !pinBottom.value) return;
+  el.scrollTop = el.scrollHeight;
+}
+
+function onMsgsScroll(): void {
+  const el = scroller.value;
+  if (!el) return;
+  pinBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
 }
 
 function onDraftKey(event: KeyboardEvent): void {
@@ -421,16 +506,105 @@ function backspace(): void {
   draft.value = [...draft.value].slice(0, -1).join('');
 }
 
+async function onImage(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  plusOpen.value = false;
+  if (!file) return;
+  try {
+    const payload = await prepareImage(file);
+    pinBottom.value = true;
+    await sendMedia({ type: 'image', content: payload.content, mime: payload.mime });
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '图片发送失败';
+  }
+}
+
+async function onFile(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  plusOpen.value = false;
+  if (!file) return;
+  if (file.size > 750_000) {
+    error.value = '文件太大，请换一个小于 750KB 的文件';
+    return;
+  }
+  try {
+    const content = await blobToBase64(file);
+    if (content.length > 1_000_000) {
+      error.value = '文件太大';
+      return;
+    }
+    pinBottom.value = true;
+    await sendMedia({
+      type: 'file',
+      content,
+      mime: file.type || 'application/octet-stream',
+      name: file.name || '文件',
+    });
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '文件发送失败';
+  }
+}
+
+async function prepareImage(file: File): Promise<{ content: string; mime: string }> {
+  if (!file.type.startsWith('image/')) throw new Error('暂不支持这种图片');
+  if (file.type === 'image/gif' && file.size <= 750_000) {
+    const content = await blobToBase64(file);
+    if (content.length <= 1_000_000) return { content, mime: 'image/gif' };
+  }
+  const image = await loadImage(file);
+  const maxEdge = 1280;
+  const scale = Math.min(1, maxEdge / Math.max(image.naturalWidth, image.naturalHeight, 1));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('图片发送失败');
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  let quality = 0.82;
+  let blob = await canvasBlob(canvas, quality);
+  while (blob.size > 700_000 && quality > 0.45) {
+    quality -= 0.12;
+    blob = await canvasBlob(canvas, quality);
+  }
+  const content = await blobToBase64(blob);
+  if (content.length > 1_000_000) throw new Error('图片太大');
+  return { content, mime: 'image/jpeg' };
+}
+
+function canvasBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('图片发送失败'))), 'image/jpeg', quality);
+  });
+}
+
+function loadImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('暂不支持这种图片'));
+      image.src = String(reader.result || '');
+    };
+    reader.onerror = () => reject(new Error('图片读取失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
 async function send(): Promise<void> {
   const text = draft.value;
+  pinBottom.value = true;
   if (await sendChat(text)) {
     draft.value = '';
     void nextTick(fitDraft);
   }
 }
 
-async function copyLink(): Promise<void> {
-  const text = link.value;
+async function copyText(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);
   } catch {
@@ -444,28 +618,45 @@ async function copyLink(): Promise<void> {
     document.execCommand('copy');
     input.remove();
   }
+}
+
+async function copyLink(): Promise<void> {
+  await copyText(link.value);
   notice.value = '邀请链接已复制';
   shareOpen.value = false;
   menuOpen.value = false;
 }
 
-function closeSheets(): void {
-  shareOpen.value = false;
-  clearAsk.value = false;
+async function copyMessage(message: ChatMessage): Promise<void> {
+  if (message.type !== 'text' || !message.content) return;
+  await copyText(message.content);
+  notice.value = '已复制';
 }
 
-function askClear(): void {
+function closeSheets(): void {
+  shareOpen.value = false;
+  clearAsk.value = '';
+}
+
+function askClear(mode: 'local' | 'all'): void {
   menuOpen.value = false;
-  clearAsk.value = true;
+  clearAsk.value = mode;
 }
 
 async function confirmClear(): Promise<void> {
-  if (clearing.value) return;
+  if (clearing.value || !clearAsk.value) return;
+  const mode = clearAsk.value;
   clearing.value = true;
   try {
-    await clearMessages(conversationId);
-    clearAsk.value = false;
-    notice.value = '已清空服务器聊天记录';
+    if (mode === 'local') {
+      clearLocalHistory();
+      notice.value = '已清空本地聊天记录';
+    } else {
+      await clearMessages(conversationId.value);
+      wipeHistory();
+      notice.value = '已清空全部聊天记录';
+    }
+    clearAsk.value = '';
   } catch (err) {
     error.value = err instanceof Error ? err.message : '清空失败';
   } finally {
@@ -487,16 +678,27 @@ function voiceWidth(message: ChatMessage): string {
   return `${Math.min(220, 72 + voiceSeconds(message) * 4)}px`;
 }
 
-function voiceSrc(message: ChatMessage): string {
+function binaryUrl(message: ChatMessage): string {
   const cached = urls.get(message.id);
   if (cached) return cached;
-  const binary = atob(message.content);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  const blob = new Blob([bytes], { type: message.mime || 'audio/webm' });
-  const url = URL.createObjectURL(blob);
-  urls.set(message.id, url);
-  return url;
+  try {
+    const binary = atob(message.content);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: message.mime || 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    urls.set(message.id, url);
+    return url;
+  } catch {
+    return '';
+  }
+}
+
+function downloadFile(message: ChatMessage): void {
+  const anchor = document.createElement('a');
+  anchor.href = binaryUrl(message);
+  anchor.download = message.name || '文件';
+  anchor.click();
 }
 
 function playVoice(message: ChatMessage): void {
@@ -506,7 +708,7 @@ function playVoice(message: ChatMessage): void {
     playingId.value = null;
     return;
   }
-  audio.src = voiceSrc(message);
+  audio.src = binaryUrl(message);
   void audio.play();
   playingId.value = message.id;
 }
@@ -591,6 +793,7 @@ async function holdEnd(): Promise<void> {
   }
   const blob = new Blob(chunks, { type: rec?.mimeType || 'audio/webm' });
   const content = await blobToBase64(blob);
+  pinBottom.value = true;
   await sendVoice(content, Math.round(elapsed), blob.type || 'audio/webm');
 }
 
